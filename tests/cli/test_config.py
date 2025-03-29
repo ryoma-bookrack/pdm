@@ -99,11 +99,6 @@ def test_default_repository_setting(project):
     assert repository is None
 
 
-def test_repository_config_not_available_on_project(project):
-    with pytest.raises(PdmUsageError):
-        project.project_config.get_repository_config("pypi", "repository")
-
-
 def test_repository_config_key_short(project):
     with pytest.raises(PdmUsageError):
         project.global_config["repository.test"] = {"url": "https://example.org/simple"}
@@ -200,10 +195,18 @@ def test_config_password_save_into_keyring(project, keyring):
 
     assert project.global_config["pypi.extra.password"] == "barbaz"
     assert project.global_config["repository.pypi.password"] == "password"
+    for key in ("pypi.extra", "repository.pypi"):
+        assert "password" not in project.global_config._file_data[key]
 
     assert keyring.enabled
     assert keyring.get_auth_info("pdm-pypi-extra", "foo") == ("foo", "barbaz")
     assert keyring.get_auth_info("pdm-repository-pypi", None) == ("frost", "password")
+
+    del project.global_config["pypi.extra"]
+    del project.global_config["repository.pypi.password"]
+    keyring.get_auth_info.cache_clear()
+    assert keyring.get_auth_info("pdm-pypi-extra", "foo") is None
+    assert keyring.get_auth_info("pdm-repository-pypi", None) is None
 
 
 def test_keyring_operation_error_disables_itself(project, keyring, mocker):

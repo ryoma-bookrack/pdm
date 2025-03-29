@@ -213,7 +213,7 @@ function TabExpansion($line, $lastWord) {
                 $completer.AddOpts(@(
                         [Option]::new((
                             "-d", "--dev", "--save-compatible", "--save-wildcard", "--dry-run", "--save-exact", "--override",
-                            "--save-minimum", "--update-eager", "--update-reuse", "--update-all", "-g", "--global",
+                            "--save-minimum", "--save-safe-compatible", "--update-eager", "--update-reuse", "--update-all", "-g", "--global",
                             "--no-sync", "--no-editable", "--no-self", "-u", "--unconstrained", "--no-isolation", "-C", "--config-setting", "--stable",
                             "--pre", "--prerelease", "-L", "--lockfile", "--fail-fast", "-x", "--frozen-lockfile", "--update-reuse-installed"
                         )),
@@ -407,6 +407,11 @@ function TabExpansion($line, $lastWord) {
                         $command = $subCommand
                         break
                     }
+                    "find" {
+                        $completer.AddOpts(([Option]::new(("--managed"))))
+                        $command = $subCommand
+                        break
+                    }
                     Default {
                         break
                     }
@@ -452,7 +457,7 @@ function TabExpansion($line, $lastWord) {
             "sync" {
                 $completer.AddOpts(@(
                         [Option]::new((
-                            "-d", "--dev", "-g", "--global", "--no-default", "--clean", "--only-keep", "--dry-run",
+                            "-d", "--dev", "-g", "--global", "--no-default", "--clean", "--clean-unselected", "--only-keep", "--dry-run",
                             "-r", "--reinstall", "--prod", "--production", "--no-editable", "--no-self", "--no-isolation",
                             "-C", "--config-setting", "-L", "--lockfile", "--fail-fast", "-x"
                         )),
@@ -470,7 +475,7 @@ function TabExpansion($line, $lastWord) {
                             "--save-minimum", "--update-eager", "--update-reuse", "--update-all", "-g", "--global", "--dry-run",
                             "--outdated", "--top", "-u", "--unconstrained", "--no-editable", "--no-self", "--no-isolation",
                             "--no-sync", "--pre", "--prerelease", "-L", "--lockfile", "--fail-fast", "-x", "--frozen-lockfile",
-                            "-C", "--config-setting", "--update-reuse-installed", "--stable", "--override"
+                            "-C", "--config-setting", "--update-reuse-installed", "--stable", "--override", "--save-safe-compatible"
                         )),
                         $sectionOption,
                         $skipOption,
@@ -483,7 +488,7 @@ function TabExpansion($line, $lastWord) {
             "use" {
                 $completer.AddOpts(
                     @(
-                        [Option]::new(@("--global", "-g", "-f", "--first", "-i", "--ignore-remembered", "--skip", "--auto-install-min", "--auto-install-max")),
+                        [Option]::new(@("--global", "-g", "-f", "--first", "-i", "--ignore-remembered", "--skip", "--auto-install-min", "--auto-install-max", "--no-version-file")),
                         $venvOption,
                         $projectOption
                     ))
@@ -522,7 +527,7 @@ function TabExpansion($line, $lastWord) {
             default {
                 # No command
                 $command = $null
-                $completer.AddOpts(([Option]::new(("--pep582", "-I", "--ignore-python", "-c", "--config", "--no-cache"))))
+                $completer.AddOpts(([Option]::new(("--pep582", "-I", "--ignore-python", "-c", "--config", "--no-cache", "-n", "--non-interactive"))))
                 $completer.AddParams($AllCommands, $false)
             }
         }

@@ -136,8 +136,23 @@ def test_venv_activate(pdm, mocker, project):
         assert result.output.strip("'\"\n").endswith("activate")
         if platform.system() == "Windows":
             assert not result.output.startswith("source")
+            assert not result.output.startswith("'")
         else:
             assert result.output.startswith("source")
+
+
+@pytest.mark.usefixtures("venv_backends")
+@pytest.mark.skipif(platform.system() == "Windows", reason="UNIX only")
+def test_venv_activate_tcsh(pdm, mocker, project):
+    project.project_config["venv.in_project"] = False
+    result = pdm(["venv", "create"], obj=project)
+    assert result.exit_code == 0, result.stderr
+    venv_path = re.match(r"Virtualenv (.+) is created successfully", result.output).group(1)
+    key = os.path.basename(venv_path)[len(get_venv_prefix(project)) :]
+
+    mocker.patch("shellingham.detect_shell", return_value=("tcsh", None))
+    result = pdm(["venv", "activate", key], obj=project)
+    assert result.output.startswith("source") and result.output.strip("'\"\n").endswith("activate.csh")
 
 
 @pytest.mark.usefixtures("venv_backends")
@@ -192,6 +207,7 @@ def test_venv_activate_no_shell(pdm, mocker, project):
         assert result.output.strip("'\"\n").endswith("activate")
         if platform.system() == "Windows":
             assert not result.output.startswith("source")
+            assert not result.output.startswith("'")
         else:
             assert result.output.startswith("source")
 
@@ -293,8 +309,8 @@ def test_venv_backend_create(project, mocker, with_pip):
 
 def test_conda_backend_create(project, mocker, with_pip):
     assert project.python
-    backend = backends.CondaBackend(project, "3.8")
-    assert backend.ident == "3.8"
+    backend = backends.CondaBackend(project, "3.9")
+    assert backend.ident == "3.9"
     mock_call = mocker.patch("subprocess.check_call")
     location = backend.create(with_pip=with_pip)
     pip_args = ["pip"] if with_pip else []
@@ -305,7 +321,7 @@ def test_conda_backend_create(project, mocker, with_pip):
             "--yes",
             "--prefix",
             str(location),
-            "python=3.8",
+            "python=3.9",
             *pip_args,
         ],
         stdout=ANY,

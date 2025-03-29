@@ -118,9 +118,7 @@ class Command(BaseCommand):
         hooks = hooks or HookManager(project)
         check_project_file(project)
         if len(packages) > 0 and (top or len(selection.groups) > 1 or not selection.default):
-            raise PdmUsageError(
-                "packages argument can't be used together with multiple -G or " "--no-default or --top."
-            )
+            raise PdmUsageError("packages argument can't be used together with multiple -G or --no-default or --top.")
         all_dependencies = project.all_dependencies
         updated_deps: dict[str, list[Requirement]] = defaultdict(list)
         locked_groups = project.lockfile.groups
@@ -187,7 +185,6 @@ class Command(BaseCommand):
                 hooks=hooks,
                 groups=locked_groups,
             )
-        hooks.try_emit("post_lock", resolution=resolved, dry_run=dry_run)
         if unconstrained:
             # Need to update version constraints
             save_version_specifiers(chain.from_iterable(updated_deps.values()), resolved, save)
@@ -196,6 +193,7 @@ class Command(BaseCommand):
                 for group, deps in updated_deps.items():
                     project.add_dependencies(deps, group, selection.dev or False)
             project.write_lockfile(project.lockfile._data, False)
+        hooks.try_emit("post_lock", resolution=resolved, dry_run=dry_run)
         if sync or dry_run:
             do_sync(
                 project,

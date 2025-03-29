@@ -33,11 +33,11 @@ from typing import (
     TYPE_CHECKING,
     Any,
     Callable,
-    Dict,
+    Generator,
     Iterable,
     Iterator,
     Mapping,
-    Tuple,
+    MutableMapping,
     Union,
     cast,
 )
@@ -63,7 +63,7 @@ from pdm.models.requirements import (
 from pdm.models.session import PDMPyPIClient
 from pdm.project.config import Config
 from pdm.project.core import Project
-from pdm.utils import find_python_in_path, normalize_name, parse_version, path_to_url
+from pdm.utils import find_python_in_path, normalize_name, parse_version
 
 if TYPE_CHECKING:
     from typing import Protocol
@@ -184,7 +184,6 @@ class TestRepository(BaseRepository):
     def dependency_generators(self) -> Iterable[Callable[[Candidate], CandidateMetadata]]:
         return (
             self._get_dependencies_from_cache,
-            self._get_dependencies_from_local_package,
             self._get_dependencies_from_fixture,
             self._get_dependencies_from_metadata,
         )
@@ -283,11 +282,11 @@ class MockWorkingSet(collections.abc.MutableMapping):
 #   When going through pytest assertions rewrite, the future annotations is ignored.
 #   As a consequence, type definition must comply with Python 3.7 syntax
 
-IndexMap = Dict[str, Path]
+IndexMap = dict[str, Path]
 """Path some root-relative http paths to some local paths"""
-IndexOverrides = Dict[str, bytes]
+IndexOverrides = dict[str, bytes]
 """PyPI indexes overrides fixture format"""
-IndexesDefinition = Dict[str, Union[Tuple[IndexMap, IndexOverrides, bool], IndexMap]]
+IndexesDefinition = dict[str, Union[tuple[IndexMap, IndexOverrides, bool], IndexMap]]
 """Mock PyPI indexes format"""
 
 
@@ -302,6 +301,16 @@ def build_env_wheels() -> Iterable[Path]:
         a list of wheels paths to install
     """
     return []
+
+
+@pytest.fixture(autouse=True)
+def temp_env() -> Generator[MutableMapping[str, str]]:
+    old_env = os.environ.copy()
+    try:
+        yield os.environ
+    finally:
+        os.environ.clear()
+        os.environ.update(old_env)
 
 
 @pytest.fixture(scope="session")
@@ -319,7 +328,7 @@ def build_env(build_env_wheels: Iterable[Path], tmp_path_factory: pytest.TempPat
     p = Core().create_project(d)
     env = PythonEnvironment(p, prefix=str(d), python=sys.executable)
     for wheel in build_env_wheels:
-        install_wheel(wheel, env)
+        install_wheel(wheel, env, requested=True)
     return d
 
 
@@ -492,12 +501,11 @@ def local_finder_artifacts() -> Path:
 
 @pytest.fixture
 def local_finder(project_no_init: Project, local_finder_artifacts: Path) -> None:
-    artifacts_dir = str(local_finder_artifacts)
     project_no_init.pyproject.settings["source"] = [
         {
             "type": "find_links",
             "verify_ssl": False,
-            "url": path_to_url(artifacts_dir),
+            "url": local_finder_artifacts.as_uri(),
             "name": "pypi",
         }
     ]
@@ -627,6 +635,7 @@ def pdm(core: Core, monkeypatch: pytest.MonkeyPatch) -> PDMCallable:
         args = args.split() if isinstance(args, str) else args
 
         with monkeypatch.context() as m:
+            old_env = os.environ.copy()
             m.setattr("sys.stdin", stdin)
             m.setattr("sys.stdout", stdout)
             m.setattr("sys.stderr", stderr)
@@ -640,6 +649,8 @@ def pdm(core: Core, monkeypatch: pytest.MonkeyPatch) -> PDMCallable:
                 exit_code = 1
                 exception = e
             finally:
+                os.environ.clear()
+                os.environ.update(old_env)
                 if cleanup:
                     core.exit_stack.close()
 

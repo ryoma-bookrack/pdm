@@ -192,7 +192,13 @@ def frozen_lockfile_option(
     project.enable_write_lockfile = False  # type: ignore[has-type]
 
 
-@Option("--pep582", const="AUTO", metavar="SHELL", nargs="?", help="Print the command line to be eval'd by the shell")
+@Option(
+    "--pep582",
+    const="AUTO",
+    metavar="SHELL",
+    nargs="?",
+    help="Print the command line to be eval'd by the shell for PEP 582",
+)
 def pep582_option(
     project: Project,
     namespace: argparse.Namespace,
@@ -250,7 +256,7 @@ groups_group.add_argument(
     metavar="GROUP",
     action=split_lists(","),
     help="Select group of optional-dependencies separated by comma "
-    "or dev-dependencies (with `-d`). Can be supplied multiple times, "
+    "or dependency-groups (with `-d`). Can be supplied multiple times, "
     'use ":all" to include all groups under the same species.',
     default=[],
 )
@@ -259,7 +265,7 @@ groups_group.add_argument(
     dest="excluded_groups",
     metavar="",
     action=split_lists(","),
-    help="Exclude groups of optional-dependencies or dev-dependencies",
+    help="Exclude groups of optional-dependencies or dependency-groups",
     default=[],
 )
 groups_group.add_argument(
@@ -296,6 +302,13 @@ _save_sub_group.add_argument(
     dest="save_strategy",
     const="compatible",
     help="Save compatible version specifiers",
+)
+_save_sub_group.add_argument(
+    "--save-safe-compatible",
+    action="store_const",
+    dest="save_strategy",
+    const="safe_compatible",
+    help="Save safe compatible version specifiers",
 )
 _save_sub_group.add_argument(
     "--save-wildcard",
@@ -384,7 +397,9 @@ global_option = Option(
 
 clean_group = ArgumentGroup("clean", is_mutually_exclusive=True)
 clean_group.add_argument("--clean", action="store_true", help="Clean packages not in the lockfile")
-clean_group.add_argument("--only-keep", action="store_true", help="Only keep the selected packages")
+clean_group.add_argument(
+    "--only-keep", "--clean-unselected", action="store_true", help="Only keep the selected packages"
+)
 
 packages_group = ArgumentGroup("Package Arguments")
 packages_group.add_argument(
@@ -411,6 +426,22 @@ def ignore_python_option(
     option_string: str | None = None,
 ) -> None:
     os.environ.update({"PDM_IGNORE_SAVED_PYTHON": "1"})
+
+
+@Option(
+    "-n",
+    "--non-interactive",
+    nargs=0,
+    dest="_non_interactive",
+    help="Don't show interactive prompts but use defaults. [env var: PDM_NON_INTERACTIVE]",
+)
+def non_interactive_option(
+    project: Project,
+    namespace: argparse.Namespace,
+    values: str | Sequence[Any] | None,
+    option_string: str | None = None,
+) -> None:
+    os.environ.update({"PDM_NON_INTERACTIVE": "1"})
 
 
 prerelease_option = ArgumentGroup("prerelease", is_mutually_exclusive=True)
@@ -489,7 +520,7 @@ install_group.options.append(config_setting_option)
 
 override_option = Option(
     "--override",
-    default=os.getenv("PDM_OVERRIDE"),
+    default=[env] if (env := os.getenv("PDM_OVERRIDE")) else None,
     action="append",
     help="Use the constraint file in pip-requirements format for overriding. [env var: PDM_OVERRIDE] "
     "This option can be used multiple times. "

@@ -6,7 +6,6 @@ import io
 import json
 import os
 import platform
-import re
 import shutil
 import site
 import subprocess
@@ -16,7 +15,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import Sequence
 
-if sys.version_info < (3, 8):
+if sys.version_info < (3, 8):  # noqa: UP036
     sys.exit("Python 3.8 or above is required to install PDM.")
 
 _plat = platform.system()
@@ -189,38 +188,11 @@ class Installer:
     additional_deps: Sequence[str] = ()
     skip_add_to_path: bool = False
     output_path: str | None = None
+    frozen_deps: bool = True
 
     def __post_init__(self):
         self._path = self._decide_path()
         self._path.mkdir(parents=True, exist_ok=True)
-        if self.version is None:
-            self.version = self._get_latest_version()
-
-    def _get_latest_version(self) -> str:
-        resp = urllib.request.urlopen(JSON_URL)
-        metadata = json.load(resp)
-
-        def version_okay(v: str) -> bool:
-            return self.prerelease or all(p.isdigit() for p in v.split("."))
-
-        def sort_version(v: str) -> tuple:
-            parts = []
-            for part in v.split("."):
-                if part.isdigit():
-                    parts.append(int(part))
-                else:
-                    digit, rest = re.match(r"^(\d*)(.*)", part).groups()
-                    if digit:
-                        parts.append(int(digit))
-                    parts.append(rest)
-            return tuple(parts)
-
-        installable_versions = {
-            k for k, v in metadata["releases"].items() if version_okay(k) and not v[0].get("yanked")
-        }
-        releases = sorted(installable_versions, key=sort_version, reverse=True)
-
-        return releases[0]
 
     def _decide_path(self) -> Path:
         if self.location is not None:
@@ -244,7 +216,7 @@ class Installer:
         _echo(
             "Installing {} ({}): {}".format(
                 colored("green", "PDM", bold=True),
-                colored("yellow", self.version),
+                colored("yellow", self.version or "latest"),
                 colored("cyan", "Creating virtual environment"),
             )
         )
@@ -272,7 +244,7 @@ class Installer:
         _echo(
             "Installing {} ({}): {}".format(
                 colored("green", "PDM", bold=True),
-                colored("yellow", self.version),
+                colored("yellow", self.version or "latest"),
                 colored("cyan", "Installing PDM and dependencies"),
             )
         )
@@ -290,19 +262,20 @@ class Installer:
             pass
         _call_subprocess([str(venv_python), "-m", "pip", "install", "-IU", "pip"])
 
+        locked = "[locked]" if self.frozen_deps else ""
         if self.version:
             if self.version.upper() == "HEAD":
-                req = f"pdm[locked] @ git+{REPO}.git@main"
+                req = f"pdm{locked} @ git+{REPO}.git@main"
             else:
                 try:
                     parsed = tuple(map(int, self.version.split(".")))
                 except ValueError:
                     extra = ""
                 else:
-                    extra = "[locked]" if parsed >= (2, 17) else ""
+                    extra = locked if parsed >= (2, 17) else ""
                 req = f"pdm{extra}=={self.version}"
         else:
-            req = "pdm[locked]"
+            req = f"pdm{locked}"
         args = [req] + [d for d in self.additional_deps if d]
         pip_cmd = [str(venv_python), "-Im", "pip", "install", *args]
         _call_subprocess(pip_cmd)
@@ -317,7 +290,7 @@ class Installer:
         _echo(
             "Installing {} ({}): {} {}".format(
                 colored("green", "PDM", bold=True),
-                colored("yellow", self.version),
+                colored("yellow", self.version or "latest"),
                 colored("cyan", "Making binary at"),
                 colored("green", str(bin_path)),
             )
@@ -341,29 +314,36 @@ class Installer:
     def _post_install(self, venv_path: Path, bin_path: Path) -> None:
         if WINDOWS:
             script = bin_path / "pdm.exe"
+            python = venv_path / "Scripts/python.exe"
         else:
             script = bin_path / "pdm"
+            python = venv_path / "bin/python"
         subprocess.check_call([str(script), "--help"])
         print()
+        pdm_version = (
+            subprocess.check_output([python, "-c", 'from importlib.metadata import version; print(version("pdm"))'])
+            .decode("utf-8")
+            .strip()
+        )
         _echo(
             "Successfully installed: {} ({}) at {}".format(
                 colored("green", "PDM", bold=True),
-                colored("yellow", self.version),
+                colored("yellow", pdm_version),
                 colored("cyan", str(script)),
             )
         )
         if not self.skip_add_to_path:
             _add_to_path(bin_path)
-        self._write_output(venv_path, script)
+        self._write_output(venv_path, script, pdm_version)
 
-    def _write_output(self, venv_path: Path, script: Path) -> None:
+    def _write_output(self, venv_path: Path, script: Path, pdm_version: str) -> None:
         if not self.output_path:
             return
         print("Writing output to", colored("green", self.output_path))
         output = {
-            "pdm_version": self.version,
+            "pdm_version": pdm_version,
             "pdm_bin": str(script),
-            "install_python_version": f"{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}",
+            "install_python_version": platform.python_version(),
             "install_location": str(venv_path),
         }
         with open(self.output_path, "w") as f:
@@ -376,6 +356,15 @@ class Installer:
         self._post_install(venv, bin_dir)
 
     def uninstall(self) -> None:
+        venv_path = self._path / "venv"
+        if not venv_path.exists():
+            _echo(
+                "{} is not currently installed.".format(
+                    colored("green", "PDM", bold=True),
+                )
+            )
+            return
+
         _echo(
             "Uninstalling {}: {}".format(
                 colored("green", "PDM", bold=True),
@@ -393,7 +382,7 @@ class Installer:
         else:
             script = bin_path / "pdm"
 
-        shutil.rmtree(self._path / "venv")
+        shutil.rmtree(venv_path)
         script.unlink()
 
         if WINDOWS:
@@ -416,6 +405,13 @@ def main():
         action="store_true",
         help="Allow prereleases to be installed",
         default=os.getenv("PDM_PRERELEASE"),
+    )
+    parser.add_argument(
+        "--no-frozen-deps",
+        action="store_false",
+        dest="frozen_deps",
+        default=not bool(os.getenv("PDM_NO_FROZEN_DEPS")),
+        help="Do not install frozen dependency versions",
     )
     parser.add_argument(
         "--remove",
@@ -452,6 +448,7 @@ def main():
         additional_deps=options.dep,
         skip_add_to_path=options.skip_add_to_path,
         output_path=options.output,
+        frozen_deps=options.frozen_deps,
     )
     if options.remove:
         installer.uninstall()

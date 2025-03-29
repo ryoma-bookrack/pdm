@@ -80,7 +80,7 @@ def _convert_req(name: str, req_dict: RequirementDict | list[RequirementDict]) -
         for req in req_dict:
             yield from _convert_req(name, req)
     elif isinstance(req_dict, str):
-        pdm_req = fix_req_path(Requirement.from_req_dict(name, _convert_specifier(req_dict), check_installable=False))
+        pdm_req = fix_req_path(Requirement.from_req_dict(name, _convert_specifier(req_dict)))
         yield pdm_req.as_line()
     else:
         assert isinstance(req_dict, dict)
@@ -100,7 +100,7 @@ def _convert_req(name: str, req_dict: RequirementDict | list[RequirementDict]) -
                 "rev",
                 req_dict.pop("tag", req_dict.pop("branch", None)),  # type: ignore[arg-type]
             )
-        pdm_req = fix_req_path(Requirement.from_req_dict(name, req_dict, check_installable=False))
+        pdm_req = fix_req_path(Requirement.from_req_dict(name, req_dict))
         yield pdm_req.as_line()
 
 
@@ -189,6 +189,11 @@ class PoetryMetaConverter(MetaConverter):
             )
         raise Unset()
 
+    @convert_from("package-mode")
+    def package_mode(self, value: bool) -> None:
+        self.settings["distribution"] = value
+        raise Unset()
+
     @convert_from()
     def includes(self, source: dict[str, list[str] | str]) -> list[str]:
         includes: list[str] = []
@@ -205,7 +210,8 @@ class PoetryMetaConverter(MetaConverter):
             else:
                 dest = source_includes if "sdist" in item.get("format", "") else includes
                 dest.append(item["path"])
-        self.settings.setdefault("build", {})["includes"] = includes
+        if includes:
+            self.settings.setdefault("build", {})["includes"] = includes
         raise Unset()
 
     @convert_from("exclude")
@@ -215,11 +221,10 @@ class PoetryMetaConverter(MetaConverter):
 
     @convert_from("build")
     def build(self, value: str | dict) -> None:
-        value = {}
-        if isinstance(value, dict):
-            if "generate-setup-file" in value:
-                value["run-setuptools"] = cast(bool, value["generate-setup-file"])
-        self.settings.setdefault("build", {}).update(value)
+        result = {}
+        if isinstance(value, dict) and "generate-setup-file" in value:
+            result["run-setuptools"] = cast(bool, value["generate-setup-file"])
+        self.settings.setdefault("build", {}).update(result)
         raise Unset()
 
     @convert_from("source")

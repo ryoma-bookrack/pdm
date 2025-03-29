@@ -68,6 +68,7 @@ class Command(BaseCommand):
         if options is None:
             options = argparse.Namespace(dev=False, group=None)
         project_data, settings = FORMATS[key].convert(project, filename, options)
+        dependency_groups = settings.pop("dev-dependencies", {})  # type: ignore[attr-defined]
         pyproject = project.pyproject._data
 
         if "tool" not in pyproject or "pdm" not in pyproject["tool"]:
@@ -83,7 +84,14 @@ class Command(BaseCommand):
             pyproject["project"].add(tomlkit.comment("See https://www.python.org/dev/peps/pep-0621/"))
 
         merge_dictionary(pyproject["project"], project_data)
+        dynamic_fields = pyproject["project"].get("dynamic", [])
+        if "dependencies" in project_data and "dependencies" in dynamic_fields:
+            dynamic_fields.remove("dependencies")
+        if "optional-dependencies" in project_data and "optional-dependencies" in dynamic_fields:
+            dynamic_fields.remove("optional-dependencies")
         merge_dictionary(pyproject["tool"]["pdm"], settings)
+        if dependency_groups:
+            merge_dictionary(pyproject.setdefault("dependency-groups", {}), dependency_groups)
         if reset_backend:
             pyproject["build-system"] = DEFAULT_BACKEND.build_system()
 

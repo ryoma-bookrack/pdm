@@ -18,7 +18,7 @@ from pdm.builders import EditableBuilder, WheelBuilder
 from pdm.compat import importlib_metadata as im
 from pdm.exceptions import BuildError, CandidateNotFound, InvalidPyVersion, PDMWarning, RequirementError
 from pdm.models.backends import get_backend, get_backend_by_spec
-from pdm.models.reporter import BaseReporter
+from pdm.models.reporter import CandidateReporter
 from pdm.models.requirements import (
     FileRequirement,
     Requirement,
@@ -34,7 +34,6 @@ from pdm.utils import (
     filtered_sources,
     get_rev_from_url,
     normalize_name,
-    path_to_url,
     url_without_fragments,
 )
 
@@ -120,15 +119,17 @@ class Candidate:
     """
 
     __slots__ = (
-        "req",
-        "name",
-        "version",
-        "link",
-        "summary",
-        "hashes",
+        "_preferred",
         "_prepared",
         "_requires_python",
-        "_preferred",
+        "_revision",
+        "hashes",
+        "link",
+        "name",
+        "req",
+        "requested",
+        "summary",
+        "version",
     )
 
     def __init__(
@@ -152,9 +153,11 @@ class Candidate:
         self.link = link
         self.summary = ""
         self.hashes: list[FileHash] = []
+        self.requested = False
 
         self._requires_python: str | None = None
         self._prepared: PreparedCandidate | None = None
+        self._revision = getattr(req, "revision", None)
 
     def identify(self) -> str:
         return self.req.identify()
@@ -165,6 +168,7 @@ class Candidate:
         can.hashes = self.hashes
         can._requires_python = self._requires_python
         can._prepared = self._prepared
+        can._revision = self._revision
         if can._prepared:
             can._prepared.req = requirement
         return can
@@ -192,6 +196,8 @@ class Candidate:
     def get_revision(self) -> str:
         if not self.req.is_vcs:
             raise AttributeError("Non-VCS candidate doesn't have revision attribute")
+        if self._revision:
+            return self._revision
         if self.req.revision:  # type: ignore[attr-defined]
             return self.req.revision  # type: ignore[attr-defined]
         return self._prepared.revision if self._prepared else "unknown"
@@ -237,6 +243,10 @@ class Candidate:
 
     @requires_python.setter
     def requires_python(self, value: str) -> None:
+        try:  # ensure the specifier is valid
+            PySpecSet(value)
+        except InvalidPyVersion:
+            return
         self._requires_python = value
 
     @no_type_check
@@ -267,6 +277,7 @@ class Candidate:
                 result.update(revision=self.get_revision())
         elif not self.req.is_named:
             if self.req.is_file_or_url and self.req.is_local:
+                self.req._root = project_root
                 result.update(path=self.req.str_path)
             else:
                 result.update(url=self.req.url)
@@ -276,10 +287,12 @@ class Candidate:
         """Format for output."""
         return f"[req]{self.name}[/] [warning]{self.version}[/]"
 
-    def prepare(self, environment: BaseEnvironment, reporter: BaseReporter | None = None) -> PreparedCandidate:
+    def prepare(self, environment: BaseEnvironment, reporter: CandidateReporter | None = None) -> PreparedCandidate:
         """Prepare the candidate for installation."""
         if self._prepared is None:
-            self._prepared = PreparedCandidate(self, environment, reporter=reporter or BaseReporter())
+            if isinstance(self.req, FileRequirement):
+                self.req.check_installable()
+            self._prepared = PreparedCandidate(self, environment, reporter=reporter or CandidateReporter())
         else:
             self._prepared.environment = environment
             if reporter is not None:
@@ -295,7 +308,7 @@ class PreparedCandidate:
 
     candidate: Candidate
     environment: BaseEnvironment
-    reporter: BaseReporter = dataclasses.field(default_factory=BaseReporter)
+    reporter: CandidateReporter = dataclasses.field(default_factory=CandidateReporter)
 
     def __post_init__(self) -> None:
         self.req = self.candidate.req
@@ -342,7 +355,7 @@ class PreparedCandidate:
                 assert self._source_dir
                 return _filter_none(
                     {
-                        "url": path_to_url(self._source_dir.as_posix()),
+                        "url": self._source_dir.as_uri(),
                         "dir_info": {"editable": True},
                         "subdirectory": req.subdirectory,
                     }
@@ -418,7 +431,7 @@ class PreparedCandidate:
         sources = filtered_sources(self.environment.project.sources, self.req.key)
         env_spec = self.environment.allow_all_spec if allow_all else self.environment.spec
         with self.environment.get_finder(sources, env_spec=env_spec) as finder:
-            if not self.link or self.link.is_wheel and not self._wheel_compatible(self.link.filename, allow_all):
+            if not self.link or (self.link.is_wheel and not self._wheel_compatible(self.link.filename, allow_all)):
                 if self.req.is_file_or_url:
                     raise CandidateNotFound(f"The URL requirement {self.req.as_line()} is a wheel but incompatible")
                 self.link = self._cached = None  # reset the incompatible wheel
@@ -594,7 +607,7 @@ class PreparedCandidate:
             result = self.prepare_metadata()
             if not self.candidate.name:
                 self.req.name = self.candidate.name = cast(str, result.metadata.get("Name"))
-            if not self.candidate.version:
+            if not self.candidate.version and result.metadata.get("Version"):
                 self.candidate.version = result.version
             if not self.candidate.requires_python:
                 self.candidate.requires_python = result.metadata.get("Requires-Python", "")

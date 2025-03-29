@@ -216,7 +216,11 @@ def test_export_replace_project_root(project):
     assert "${PROJECT_ROOT}" not in result
 
 
-def test_convert_setup_py_project(project):
+@pytest.mark.usefixtures("local_finder")
+def test_convert_setup_py_project(project, pdm):
+    project._saved_python = None
+    project.project_config["python.use_venv"] = True
+    pdm(["add", "setuptools"], obj=project)
     golden_file = FIXTURES / "projects/test-setuptools/setup.py"
     assert setup_py.check_fingerprint(project, golden_file)
     result, settings = setup_py.convert(project, golden_file, ns())
@@ -230,7 +234,7 @@ def test_convert_setup_py_project(project):
         "license": {"text": "MIT"},
         "classifiers": ["Framework :: Django", "Programming Language :: Python :: 3"],
         "requires-python": ">=3.5",
-        "dependencies": ['importlib-metadata; python_version<"3.8"', "requests"],
+        "dependencies": ['importlib-metadata; python_version<"3.10"', "requests"],
         "scripts": {"mycli": "mymodule:main"},
     }
     assert settings == {"package-dir": "src"}

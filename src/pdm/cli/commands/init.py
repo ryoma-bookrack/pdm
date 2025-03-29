@@ -24,7 +24,12 @@ if TYPE_CHECKING:
 
 
 class Command(BaseCommand):
-    """Initialize a pyproject.toml for PDM"""
+    """Initialize a pyproject.toml for PDM.
+
+    Built-in templates:
+    - default: `pdm init`, A simple template with a basic structure.
+    - minimal: `pdm init minimal`, A minimal template with only `pyproject.toml`.
+    """
 
     def __init__(self) -> None:
         self.interactive = True
@@ -79,7 +84,10 @@ class Command(BaseCommand):
 
     def _init_builtin(self, project: Project, options: argparse.Namespace) -> None:
         metadata = self.get_metadata_from_input(project, options)
-        with ProjectTemplate(options.template) as template:
+        template = options.template
+        if not template:
+            template = "default" if options.dist else "minimal"
+        with ProjectTemplate(template) as template:
             template.generate(project.root, metadata, options.overwrite)
         project.pyproject.reload()
 
@@ -114,6 +122,7 @@ class Command(BaseCommand):
                 "Do you want to build this project for distribution(such as wheel)?\n"
                 "If yes, it will be installed by default when running `pdm install`."
             )
+        options.dist = is_dist
         build_backend: type[BuildBackend] | None = None
         python = project.python
         if is_dist:
@@ -226,6 +235,7 @@ class Command(BaseCommand):
         if python_info.get_venv() is None:
             project.core.ui.info(
                 "You are using the PEP 582 mode, no virtualenv is created.\n"
+                "You can change configuration with `pdm config python.use_venv True`.\n"
                 "For more info, please visit https://peps.python.org/pep-0582/"
             )
         project.python = python_info
@@ -235,7 +245,7 @@ class Command(BaseCommand):
             project.core.ui.echo("pyproject.toml already exists, update it now.", style="primary")
         else:
             project.core.ui.echo("Creating a pyproject.toml for PDM...", style="primary")
-        self.set_interactive(not options.non_interactive)
+        self.set_interactive(not options.non_interactive and termui.is_interactive())
         self.do_init(project, options=options)
         project.core.ui.echo("Project is initialized successfully", style="primary")
         if self.interactive:

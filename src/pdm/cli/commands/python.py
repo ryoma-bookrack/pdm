@@ -1,16 +1,19 @@
 from __future__ import annotations
 
+import os
 import shutil
 import sys
 import tempfile
+from argparse import ArgumentParser
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 from pdm.cli.commands.base import BaseCommand
 from pdm.cli.options import verbose_option
 from pdm.environments import BareEnvironment
 from pdm.exceptions import InstallationError, PdmArgumentError
 from pdm.models.python import PythonInfo
+from pdm.termui import Verbosity
 from pdm.utils import get_all_installable_python_versions
 
 if TYPE_CHECKING:
@@ -31,6 +34,8 @@ class Command(BaseCommand):
         ListCommand.register_to(subparsers, name="list")
         RemoveCommand.register_to(subparsers, name="remove")
         InstallCommand.register_to(subparsers, name="install")
+        LinkCommand.register_to(subparsers, name="link")
+        FindCommand.register_to(subparsers, name="find")
 
     @classmethod
     def register_to(cls, subparsers: _SubParsersAction, name: str | None = None, **kwargs: Any) -> None:
@@ -68,18 +73,25 @@ class RemoveCommand(BaseCommand):
         if not root.exists():
             ui.error(f"No Python interpreter found for {options.version!r}")
             sys.exit(1)
-        version = options.version.lower()
-        if "@" not in version:  # pragma: no cover
-            version = f"cpython@{version}"
-        matched = next((child for child in root.iterdir() if child.name == version), None)
-        if not matched:
-            ui.error(f"No Python interpreter found for {options.version!r}")
-            ui.echo("Installed Pythons:", err=True)
-            for child in root.iterdir():
-                ui.echo(f"  {child.name}", err=True)
-            sys.exit(1)
-        shutil.rmtree(matched, ignore_errors=True)
-        ui.echo(f"[success]Removed installed[/] {options.version}")
+        version = str(options.version)
+        if root.joinpath(version).exists():
+            version_dir = root.joinpath(version)
+        else:
+            version = options.version.lower()
+            if "@" not in version:  # pragma: no cover
+                version = f"cpython@{version}"
+            version_dir = root.joinpath(version)
+            if not version_dir.exists():
+                ui.error(f"No Python interpreter found for {options.version!r}")
+                ui.echo("Installed Pythons:", err=True)
+                for child in root.iterdir():
+                    ui.echo(f"  {child.name}", err=True)
+                sys.exit(1)
+        if version_dir.is_symlink():
+            version_dir.unlink()
+        else:
+            shutil.rmtree(version_dir, ignore_errors=True)
+        ui.echo(f"[success]Removed installed[/] {options.version}", verbosity=Verbosity.NORMAL)
 
 
 class InstallCommand(BaseCommand):
@@ -99,7 +111,7 @@ class InstallCommand(BaseCommand):
         parser.add_argument(
             "--min",
             action="store_true",
-            help="Use minimum instead of highest version " "for installation if `version` is left empty",
+            help="Use minimum instead of highest version for installation if `version` is left empty",
         )
 
     def handle(self, project: Project, options: Namespace) -> None:
@@ -134,25 +146,106 @@ class InstallCommand(BaseCommand):
         arch = "x86" if arch == "32" else (arch or THIS_ARCH)
 
         ver, python_file = get_download_link(version, implementation=implementation, arch=arch, build_dir=False)
-        with ui.open_spinner(f"Downloading [success]{ver}[/]") as spinner:
-            destination = root / str(ver)
-            interpreter = destination / "bin" / "python3" if sys.platform != "win32" else destination / "python.exe"
-            logger.debug("Installing %s to %s", ver, destination)
+        ver_str = f"{ver}{'t' if request.endswith('t') else ''}"
+        with ui.open_spinner(f"Downloading [success]{ver_str}[/]") as spinner:
+            destination = root / ver_str
+            logger.debug("Installing %s to %s", ver_str, destination)
             env = BareEnvironment(project)
+            install_root = destination
+            if install_root.joinpath("install").exists():
+                install_root = install_root.joinpath("install")
+            interpreter = install_root / "bin" / "python3" if sys.platform != "win32" else destination / "python.exe"
             if not destination.exists() or not interpreter.exists():
                 shutil.rmtree(destination, ignore_errors=True)
                 destination.mkdir(parents=True, exist_ok=True)
                 with tempfile.NamedTemporaryFile() as tf:
                     tf.close()
                     original_filename = download(python_file, tf.name, env.session)
-                    spinner.update(f"Installing [success]{ver}[/]")
-                    install_file(tf.name, destination, original_filename)
-
+                    spinner.update(f"Installing [success]{ver_str}[/]")
+                    try:
+                        install_file(tf.name, destination, original_filename)
+                    except ModuleNotFoundError as e:
+                        if "zstandard is required" in str(e):
+                            raise InstallationError(
+                                "zstandard is required to install this Python version. "
+                                "Please install it with `pdm self add zstandard`."
+                            ) from None
+        if destination.joinpath("install").exists():
+            install_root = destination.joinpath("install")
+            interpreter = install_root / "bin" / "python3" if sys.platform != "win32" else install_root / "python.exe"
         if not interpreter.exists():
             raise InstallationError("Installation failed, please try again.")
 
         python_info = PythonInfo.from_path(interpreter)
-        ui.echo(f"[success]Successfully installed[/] {python_info.implementation}@{python_info.version}")
-        ui.echo(f"[info]Version:[/] {python_info.version}")
-        ui.echo(f"[info]Executable:[/] {python_info.path}")
+        ui.echo(
+            f"[success]Successfully installed[/] {python_info.implementation}@{python_info.version}",
+            verbosity=Verbosity.NORMAL,
+        )
+        ui.echo(f"[info]Version:[/] {python_info.version}", verbosity=Verbosity.NORMAL)
+        ui.echo(f"[info]Executable:[/] {python_info.path}", verbosity=Verbosity.NORMAL)
         return python_info
+
+
+class LinkCommand(BaseCommand):
+    """Link an external Python interpreter to PDM"""
+
+    arguments = (verbose_option,)
+
+    def add_arguments(self, parser: ArgumentParser) -> None:
+        parser.add_argument("interpreter", help="The path to the Python interpreter to link")
+        parser.add_argument("--name", help="The name of the link")
+
+    def handle(self, project: Project, options: Namespace) -> None:
+        python_info = PythonInfo.from_path(options.interpreter)
+        if not python_info.valid:
+            raise PdmArgumentError("Invalid Python interpreter")
+        if options.name is None:
+            link_name = f"{python_info.implementation}@{python_info.identifier}"
+        else:
+            link_name = cast(str, options.name)
+        link_path = Path(project.config["python.install_root"]).expanduser() / link_name
+        if link_path.exists():
+            raise PdmArgumentError(f"Link {link_name} already exists")
+        exe_dir = python_info.path.parent
+        if exe_dir.name in ("Scripts", "bin"):
+            exe_dir = exe_dir.parent
+        link_path.parent.mkdir(parents=True, exist_ok=True)
+        link_path.symlink_to(exe_dir)
+        project.core.ui.echo(f"[success]Successfully linked {link_name} to {exe_dir}[/]")
+
+
+class FindCommand(BaseCommand):
+    """Search for a Python interpreter"""
+
+    arguments = (verbose_option,)
+
+    def add_arguments(self, parser: ArgumentParser) -> None:
+        parser.add_argument("--managed", action="store_true", help="Only find interpreters managed by PDM")
+        parser.add_argument("request", help="The Python version to find. E.g. 3.12, cpython@3.13")
+
+    def handle(self, project: Project, options: Namespace) -> None:
+        from findpython import Finder
+
+        if options.managed:
+            old_rye_root = os.getenv("RYE_PY_ROOT")
+            os.environ["RYE_PY_ROOT"] = os.path.expanduser(project.config["python.install_root"])
+            try:
+                finder = Finder(resolve_symlinks=True, selected_providers=["rye"])
+            finally:
+                if old_rye_root:  # pragma: no cover
+                    os.environ["RYE_PY_ROOT"] = old_rye_root
+                else:
+                    del os.environ["RYE_PY_ROOT"]
+        else:
+            finder = project._get_python_finder()
+
+        python_version = finder.find(options.request)
+        location = (
+            "managed installations"
+            if options.managed
+            else "virtual environments, managed installations, or search paths"
+        )
+        if python_version is None:
+            project.core.ui.error(f"Python interpreter {options.request!r} not found in {location}")
+            raise SystemExit(1)
+        print(python_version.executable)

@@ -29,6 +29,14 @@ def test_update_ignore_constraints(project, repository, pdm):
     assert project.pyproject.metadata["dependencies"] == ["pytz~=2020.2"]
     assert project.get_locked_repository().candidates["pytz"].version == "2020.2"
 
+    pdm(["add", "chardet"], obj=project, strict=True)
+    assert "chardet~=3.0" in project.pyproject.metadata["dependencies"]
+    assert project.get_locked_repository().candidates["chardet"].version == "3.0.4"
+    repository.add_candidate("chardet", "3.0.6")
+
+    pdm(["update", "chardet", "--unconstrained", "--save-safe-compatible"], obj=project, strict=True)
+    assert "chardet~=3.0.6" in project.pyproject.metadata["dependencies"]
+
 
 @pytest.mark.usefixtures("working_set")
 @pytest.mark.parametrize("strategy", ["reuse", "all"])
@@ -182,7 +190,7 @@ def test_update_transitive(project, repository, pdm):
 
 
 @pytest.mark.usefixtures("working_set")
-def test_update_transitive_nonexistant_dependencies(project, pdm):
+def test_update_transitive_nonexistent_dependencies(project, pdm):
     pdm(["add", "requests", "--no-sync"], obj=project, strict=True)
     result = pdm(["update", "numpy"], obj=project)
     assert "ProjectError" in result.stderr
@@ -315,3 +323,12 @@ def test_update_group_not_in_lockfile(project, working_set, pdm):
     result = pdm(["update", "--group", "extra"], obj=project)
     assert result.exit_code != 0
     assert "Requested groups not in lockfile: extra" in result.stderr
+
+
+@pytest.mark.usefixtures("working_set")
+def test_update_dependency_group_with_include(project, pdm):
+    from pdm.formats.base import make_array
+
+    project.pyproject.dependency_groups.update({"tz": ["pytz"], "web": make_array([{"include-group": "tz"}])})
+    project.pyproject.write()
+    pdm(["update", "-u"], obj=project, strict=True)

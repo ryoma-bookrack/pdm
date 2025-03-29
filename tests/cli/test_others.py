@@ -8,16 +8,16 @@ from pdm.utils import cd
 from tests import FIXTURES
 
 
-@pytest.mark.usefixtures("project_no_init", "local_finder")
-def test_build_distributions(tmp_path, core):
+def test_build_distributions(project):
     from pdm.cli.commands.build import Command
 
-    project = core.create_project()
-    Command.do_build(project, dest=tmp_path.as_posix())
-    wheel = next(tmp_path.glob("*.whl"))
-    assert wheel.name.startswith("pdm-")
-    tarball = next(tmp_path.glob("*.tar.gz"))
-    assert tarball.exists()
+    Command.do_build(project)
+    dist = project.root / "dist"
+    assert dist.exists()
+    wheel = next(dist.glob("*.whl"))
+    assert wheel.name.startswith("test_project-")
+    tarball = next(dist.glob("*.tar.gz"))
+    assert tarball.name.startswith("test_project-")
 
 
 def test_project_no_init_error(project_no_init, pdm):
@@ -127,10 +127,10 @@ def test_import_requirement_no_overwrite(project, pdm, tmp_path):
 
 
 @pytest.mark.network
+@pytest.mark.xfail(reason="HTTP search risk controlled")
 def test_search_package(pdm, tmp_path):
     with cd(tmp_path):
-        result = pdm(["search", "requests"])
-    assert result.exit_code == 0
+        result = pdm(["search", "requests"], strict=True)
     assert len(result.output.splitlines()) > 0
     assert not tmp_path.joinpath("__pypackages__").exists()
     assert not tmp_path.joinpath(".pdm-python").exists()
@@ -234,9 +234,20 @@ def test_show_update_hint(pdm, project, monkeypatch):
 
 @pytest.mark.usefixtures("repository")
 def test_export_with_platform_markers(pdm, project):
-    pdm(["add", "--no-sync", 'urllib3; sys_platform == "fake"'], obj=project, strict=True)
+    pdm(
+        ["add", "--no-sync", 'urllib3; sys_platform == "fake"', 'idna; python_version >= "3.7"'],
+        obj=project,
+        strict=True,
+    )
     result = pdm(["export", "--no-hashes"], obj=project, strict=True)
-    assert 'urllib3==1.22; sys_platform == "fake"' in result.output.splitlines()
+    result_lines = result.output.splitlines()
+    assert 'urllib3==1.22; sys_platform == "fake"' in result_lines
+    assert 'idna==2.7; python_version >= "3.7"' in result_lines
+
+    result = pdm(["export", "--no-hashes", "--no-markers"], obj=project, strict=True)
+    result_lines = result.output.splitlines()
+    assert not any(line.startswith("urllib3") for line in result_lines)
+    assert "idna==2.7" in result_lines
 
 
 @pytest.mark.usefixtures("repository", "vcs")

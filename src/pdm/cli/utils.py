@@ -7,21 +7,11 @@ import os
 import re
 import sys
 from collections import OrderedDict
-from concurrent.futures import ThreadPoolExecutor
 from fnmatch import fnmatch
 from gettext import gettext as _
 from json import dumps
 from pathlib import Path
-from typing import (
-    TYPE_CHECKING,
-    Any,
-    Callable,
-    Iterable,
-    Mapping,
-    MutableMapping,
-    cast,
-    no_type_check,
-)
+from typing import TYPE_CHECKING, Any, Callable, Iterable, Mapping, MutableMapping, cast, no_type_check
 
 from packaging.specifiers import SpecifierSet
 from resolvelib.structs import DirectedGraph
@@ -30,18 +20,9 @@ from rich.tree import Tree
 from pdm import termui
 from pdm.exceptions import PdmArgumentError, ProjectError
 from pdm.models.markers import EnvSpec
-from pdm.models.requirements import (
-    Requirement,
-    filter_requirements_with_extras,
-    strip_extras,
-)
+from pdm.models.requirements import Requirement, filter_requirements_with_extras, strip_extras
 from pdm.models.specifiers import PySpecSet, get_specifier
-from pdm.utils import (
-    comparable_version,
-    is_path_relative_to,
-    normalize_name,
-    url_to_path,
-)
+from pdm.utils import comparable_version, is_path_relative_to, normalize_name, url_to_path
 
 if TYPE_CHECKING:
     from argparse import Action, _ArgumentGroup
@@ -52,7 +33,6 @@ if TYPE_CHECKING:
     from pdm.compat import Distribution
     from pdm.compat import importlib_metadata as im
     from pdm.models.candidates import Candidate
-    from pdm.models.repositories import BaseRepository
     from pdm.project import Project
 
 
@@ -85,19 +65,19 @@ class PdmFormatter(argparse.RawDescriptionHelpFormatter):
 
         # no help; start on same line and add a final newline
         if not action.help:
-            tup = self._current_indent, "", action_header
-            action_header = "%*s%s\n" % tup
+            tup = "", self._current_indent, action_header
+            action_header = "{0:>{1}}{2}\n".format(*tup)
 
         # short action name; start on the same line and pad two spaces
         elif len(action_header) <= action_width:
-            tup = self._current_indent, "", action_width, action_header  # type: ignore[assignment]
-            action_header = "%*s%-*s  " % tup  # type: ignore[str-format]
+            tup = "", self._current_indent, action_header, action_width  # type: ignore[assignment]
+            action_header = "{0:>{1}}{2:<{3}}  ".format(*tup)
             indent_first = 0
 
         # long action name; start on the next line
         else:
-            tup = self._current_indent, "", action_header
-            action_header = "%*s%s\n" % tup
+            tup = "", self._current_indent, action_header
+            action_header = "{0:>{1}}{2}\n".format(*tup)
             indent_first = help_position
 
         # Special format for empty action_header
@@ -115,9 +95,9 @@ class PdmFormatter(argparse.RawDescriptionHelpFormatter):
         if action.help:
             help_text = self._expand_help(action)
             help_lines = self._split_lines(help_text, help_width)
-            parts.append("%*s%s\n" % (indent_first, "", help_lines[0]))
+            parts.append("{:>{}}{}\n".format("", indent_first, help_lines[0]))
             for line in help_lines[1:]:
-                parts.append("%*s%s\n" % (help_position, "", line))
+                parts.append("{:>{}}{}\n".format("", help_position, line))
 
         # or add a newline if the description doesn't end with one
         elif not action_header.endswith("\n"):
@@ -158,6 +138,26 @@ class ArgumentParser(argparse.ArgumentParser):
         return args, argv
 
 
+def format_similar_command(root_command: str, commands: list[str], script_commands: list[str]) -> str:
+    from difflib import get_close_matches
+
+    similar_commands = get_close_matches(root_command, commands)
+    similar_script_commands = get_close_matches(root_command, script_commands)
+    commands_text = "\n".join([f"  - {cmd}" for cmd in similar_commands])
+    script_commands_text = "\n".join([f"  - {cmd}" for cmd in similar_script_commands])
+    message = f"[red]Command not found: {root_command}[/]"
+    if commands_text:
+        message += f"""
+[green]Did you mean one of these commands?
+{commands_text}[/]"""
+
+    if script_commands_text:
+        message += f"""
+[yellow]{"Or" if commands_text else "Did you mean"} one of these script commands?
+{script_commands_text}[/]"""
+    return message
+
+
 class ErrorArgumentParser(ArgumentParser):
     """A subclass of argparse.ArgumentParser that raises
     parsing error rather than exiting.
@@ -166,17 +166,17 @@ class ErrorArgumentParser(ArgumentParser):
     """
 
     def _parse_known_args(
-        self, arg_strings: list[str], namespace: argparse.Namespace
+        self, arg_strings: list[str], namespace: argparse.Namespace, *args: Any, **kwargs: Any
     ) -> tuple[argparse.Namespace, list[str]]:
         try:
-            return super()._parse_known_args(arg_strings, namespace)
+            return super()._parse_known_args(arg_strings, namespace, *args, **kwargs)
         except argparse.ArgumentError as e:
             # We raise a dedicated error to avoid being caught by the caller
             raise PdmArgumentError(e) from e
 
 
 @dc.dataclass(frozen=True)
-class Package:
+class PackageNode:
     """An internal class for the convenience of dependency graph building."""
 
     name: str = dc.field(hash=True, compare=True)
@@ -194,11 +194,11 @@ def build_dependency_graph(
     include_sub: bool = True,
 ) -> DirectedGraph:
     """Build a dependency graph from locked result."""
-    graph: DirectedGraph[Package | None] = DirectedGraph()
+    graph: DirectedGraph[PackageNode | None] = DirectedGraph()
     graph.add(None)  # sentinel parent of top nodes.
     node_with_extras: set[str] = set()
 
-    def add_package(key: str, dist: Distribution | None) -> Package:
+    def add_package(key: str, dist: Distribution | None) -> PackageNode:
         name, extras = strip_extras(key)
         extras = extras or ()
         reqs: dict[str, Requirement] = {}
@@ -211,7 +211,7 @@ def build_dependency_graph(
         else:
             version = None
 
-        node = Package(key, version, reqs)
+        node = PackageNode(key, version, reqs)
         if node not in graph:
             if extras:
                 node_with_extras.add(name)
@@ -255,7 +255,7 @@ def specifier_from_requirement(requirement: Requirement) -> str:
 def add_package_to_tree(
     root: Tree,
     graph: DirectedGraph,
-    package: Package,
+    package: PackageNode,
     required: list[str],
     visited: frozenset[str] = frozenset(),
 ) -> None:
@@ -291,8 +291,8 @@ def add_package_to_tree(
 def add_package_to_reverse_tree(
     root: Tree,
     graph: DirectedGraph,
-    package: Package,
-    child: Package | None = None,
+    package: PackageNode,
+    child: PackageNode | None = None,
     requires: str = "",
     visited: frozenset[str] = frozenset(),
 ) -> None:
@@ -315,24 +315,24 @@ def add_package_to_reverse_tree(
 
     if package.name in visited:
         return
-    parents: list[Package] = sorted(filter(None, graph.iter_parents(package)), key=lambda p: p.name)
+    parents: list[PackageNode] = sorted(filter(None, graph.iter_parents(package)), key=lambda p: p.name)
     for parent in parents:
         requires = specifier_from_requirement(parent.requirements[package.name])
         add_package_to_reverse_tree(node, graph, parent, package, requires, visited=visited | {package.name})
     return
 
 
-def package_is_project(package: Package, project: Project) -> bool:
+def package_is_project(package: PackageNode, project: Project) -> bool:
     return project.is_distribution and package.name == normalize_name(project.name)
 
 
 def _format_forward_dependency_graph(
-    project: Project, graph: DirectedGraph[Package | None], patterns: list[str]
+    project: Project, graph: DirectedGraph[PackageNode | None], patterns: list[str]
 ) -> Tree:
     """Format dependency graph for output."""
     root = Tree("Dependencies", hide_root=True)
 
-    def find_package_to_add(package: Package) -> Package | None:
+    def find_package_to_add(package: PackageNode) -> PackageNode | None:
         if not patterns:
             return package
         to_check = [package]
@@ -367,11 +367,11 @@ def _format_forward_dependency_graph(
 
 
 def _format_reverse_dependency_graph(
-    project: Project, graph: DirectedGraph[Package | None], patterns: list[str]
+    project: Project, graph: DirectedGraph[PackageNode | None], patterns: list[str]
 ) -> Tree:
     """Format reverse dependency graph for output."""
 
-    def find_package_to_add(package: Package) -> Package | None:
+    def find_package_to_add(package: PackageNode) -> PackageNode | None:
         if not patterns:
             return package
         to_check = [package]
@@ -392,10 +392,10 @@ def _format_reverse_dependency_graph(
 
 
 def build_forward_dependency_json_subtree(
-    root: Package,
+    root: PackageNode,
     project: Project,
-    graph: DirectedGraph[Package | None],
-    required_by: Package | None = None,
+    graph: DirectedGraph[PackageNode | None],
+    required_by: PackageNode | None = None,
     visited: frozenset[str] = frozenset(),
 ) -> dict:
     required: set[str] = set()
@@ -436,10 +436,10 @@ def build_forward_dependency_json_subtree(
 
 
 def build_reverse_dependency_json_subtree(
-    root: Package,
+    root: PackageNode,
     project: Project,
-    graph: DirectedGraph[Package | None],
-    requires: Package | None = None,
+    graph: DirectedGraph[PackageNode | None],
+    requires: PackageNode | None = None,
     visited: frozenset[str] = frozenset(),
 ) -> dict:
     parents = graph.iter_parents(root) if root.name not in visited else []
@@ -458,14 +458,14 @@ def build_reverse_dependency_json_subtree(
     )
 
 
-def package_match_patterns(package: Package, patterns: list[str]) -> bool:
+def package_match_patterns(package: PackageNode, patterns: list[str]) -> bool:
     return not patterns or any(fnmatch(package.name, pattern) for pattern in patterns)
 
 
 def build_dependency_json_tree(
-    project: Project, graph: DirectedGraph[Package | None], reverse: bool, patterns: list[str]
+    project: Project, graph: DirectedGraph[PackageNode | None], reverse: bool, patterns: list[str]
 ) -> list[dict]:
-    def find_package_to_add(package: Package) -> Package | None:
+    def find_package_to_add(package: PackageNode) -> PackageNode | None:
         if not patterns:
             return package
         to_check = [package]
@@ -479,7 +479,7 @@ def build_dependency_json_tree(
                 to_check.extend(graph.iter_children(package))
         return None
 
-    top_level_packages: Iterable[Package | None]
+    top_level_packages: Iterable[PackageNode | None]
     if reverse:
         top_level_packages = filter(lambda n: not list(graph.iter_children(n)), graph)  # leaf nodes
         build_dependency_json_subtree: Callable = build_reverse_dependency_json_subtree
@@ -495,7 +495,7 @@ def build_dependency_json_tree(
 
 def show_dependency_graph(
     project: Project,
-    graph: DirectedGraph[Package | None],
+    graph: DirectedGraph[PackageNode | None],
     reverse: bool = False,
     json: bool = False,
     patterns: list[str] | None = None,
@@ -528,7 +528,7 @@ def save_version_specifiers(
 
     :param requirements: the requirements to be updated
     :param resolved: the resolved mapping
-    :param save_strategy: compatible/wildcard/exact
+    :param save_strategy: compatible/safe_compatible/wildcard/exact
     """
 
     def candidate_version(candidates: list[Candidate]) -> Version | None:
@@ -546,11 +546,14 @@ def save_version_specifiers(
                 continue
             if save_strategy == "exact":
                 r.specifier = get_specifier(f"=={version}")
-            elif save_strategy == "compatible":
+            elif save_strategy in ["compatible", "safe_compatible"]:
                 if version.is_prerelease or version.is_devrelease:
                     r.specifier = get_specifier(f">={version},<{version.major + 1}")
                 else:
-                    r.specifier = get_specifier(f"~={version.major}.{version.minor}")
+                    if save_strategy == "compatible":
+                        r.specifier = get_specifier(f"~={version.major}.{version.minor}")
+                    else:
+                        r.specifier = get_specifier(f"~={version}")
             elif save_strategy == "minimum":
                 r.specifier = get_specifier(f">={version}")
 
@@ -670,16 +673,6 @@ def merge_dictionary(target: MutableMapping[Any, Any], input: Mapping[Any, Any],
                 target[key].multiline(True)  # type: ignore[attr-defined]
         else:
             target[key] = value
-
-
-def fetch_hashes(repository: BaseRepository, candidates: Iterable[Candidate]) -> None:
-    """Fetch hashes for candidates in parallel"""
-
-    def do_fetch(candidate: Candidate) -> None:
-        candidate.hashes = repository.get_hashes(candidate)
-
-    with ThreadPoolExecutor() as executor:
-        executor.map(do_fetch, candidates)
 
 
 def is_pipx_installation() -> bool:

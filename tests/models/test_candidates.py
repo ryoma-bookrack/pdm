@@ -5,11 +5,11 @@ import shutil
 import pytest
 from unearth import Link
 
-from pdm.exceptions import CandidateNotFound
+from pdm.exceptions import RequirementError
 from pdm.models.candidates import Candidate
 from pdm.models.requirements import Requirement, parse_requirement
 from pdm.models.specifiers import PySpecSet
-from pdm.utils import is_path_relative_to, path_to_url
+from pdm.utils import is_path_relative_to
 from tests import FIXTURES
 
 
@@ -105,7 +105,7 @@ def test_parse_remote_link_metadata(project):
         "demo @ file:///${PROJECT_ROOT}/tests/fixtures/projects/demo",
         "-e ./tests/fixtures/projects/demo",
         "-e file:///${PROJECT_ROOT}/tests/fixtures/projects/demo#egg=demo",
-        "-e file:///${PROJECT_ROOT}/tests/fixtures/projects/demo-#-with-hash#egg=demo",
+        "-e file:///${PROJECT_ROOT}/tests/fixtures/projects/demo#-with-hash#egg=demo",
     ],
 )
 def test_expand_project_root_in_url(req_str, core):
@@ -201,7 +201,7 @@ def test_vcs_candidate_in_subdirectory(project, is_editable):
 
 @pytest.mark.usefixtures("local_finder")
 def test_sdist_candidate_with_wheel_cache(project, mocker):
-    file_link = Link(path_to_url((FIXTURES / "artifacts/demo-0.0.1.tar.gz").as_posix()))
+    file_link = Link((FIXTURES / "artifacts/demo-0.0.1.tar.gz").as_uri())
     built_path = FIXTURES / "artifacts/demo-0.0.1-py2.py3-none-any.whl"
     wheel_cache = project.make_wheel_cache()
     cache_path = wheel_cache.get_path_for_link(file_link, project.environment.spec)
@@ -272,8 +272,7 @@ def test_legacy_pep345_tag_link(project):
     project.project_config["pypi.url"] = "https://my.pypi.org/simple"
     req = parse_requirement("pep345-legacy")
     repo = project.get_repository()
-    with pytest.raises(CandidateNotFound):
-        _ = next(iter(repo.find_candidates(req)))
+    _ = next(iter(repo.find_candidates(req)))
 
 
 @pytest.mark.filterwarnings("ignore::FutureWarning")
@@ -281,8 +280,7 @@ def test_ignore_invalid_py_version(project):
     project.project_config["pypi.url"] = "https://my.pypi.org/simple"
     req = parse_requirement("wheel")
     repo = project.get_repository()
-    with pytest.raises(CandidateNotFound):
-        _ = next(iter(repo.find_candidates(req)))
+    _ = next(iter(repo.find_candidates(req)))
 
 
 def test_find_candidates_from_find_links(project):
@@ -317,5 +315,5 @@ def test_parse_metadata_with_dynamic_fields(project, local_finder):
 def test_get_metadata_for_non_existing_path(project):
     req = parse_requirement("file:///${PROJECT_ROOT}/non-existing-path")
     candidate = Candidate(req)
-    with pytest.raises(FileNotFoundError, match="No such file or directory"):
+    with pytest.raises(RequirementError, match="The local path '.+' does not exist"):
         candidate.prepare(project.environment).metadata

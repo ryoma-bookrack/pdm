@@ -163,8 +163,9 @@ class TaskRunner:
             return self.project.environment
         tool_config = metadata.pop("tool", {})
         script_project = self.project.core.create_project()
-        script_project.pyproject.set_data({"project": metadata, "tool": tool_config})
-        venv_name = hashlib.md5(os.path.realpath(script_file).encode("utf-8")).hexdigest()
+        script_project.pyproject.set_data({"project": {"name": "temp-project", **metadata}, "tool": tool_config})
+        md5_kwargs = {"usedforsecurity": False}
+        venv_name = hashlib.md5(os.path.realpath(script_file).encode("utf-8"), **md5_kwargs).hexdigest()
         venv_backend = BACKENDS[script_project.config["venv.backend"]](script_project, None)
         venv = venv_backend.get_location(None, venv_name)
         if venv.exists() and not self.recreate_env:
@@ -227,8 +228,17 @@ class TaskRunner:
         working_dir: str | None = None,
     ) -> int:
         """Run command in a subprocess and return the exit code."""
+        import dotenv
+        from dotenv.main import resolve_variables
+
         project = self.project
-        process_env = os.environ.copy()
+        if not shell and args[0].endswith(".py"):
+            project_env = self._get_script_env(os.path.expanduser(args[0]))
+        else:
+            check_project_file(project)
+            project_env = project.environment
+        this_path = project_env.get_paths()["scripts"]
+        os.environ.update(project_env.process_env)
         if env_file is not None:
             if isinstance(env_file, str):
                 path = env_file
@@ -237,34 +247,21 @@ class TaskRunner:
                 path = env_file["override"]
                 override = True
 
-            import dotenv
-
             project.core.ui.echo(
                 f"Loading .env file: [success]{env_file}[/]",
                 err=True,
                 verbosity=termui.Verbosity.DETAIL,
             )
-            dotenv_env = dotenv.dotenv_values(project.root / path, encoding="utf-8")
-            if override:
-                process_env = {**process_env, **dotenv_env}
-            else:
-                process_env = {**dotenv_env, **process_env}
-        if not shell and args[0].endswith(".py"):
-            project_env = self._get_script_env(os.path.expanduser(args[0]))
-        else:
-            check_project_file(project)
-            project_env = project.environment
-        this_path = project_env.get_paths()["scripts"]
-        process_env.update(project_env.process_env)
+            dotenv.load_dotenv(self.project.root / path, override=override)
         if env:
-            process_env.update(env)
+            os.environ.update(resolve_variables(env.items(), override=True))
         if shell:
             assert isinstance(args, str)
             # environment variables will be expanded by shell
             process_cmd: str | Sequence[str] = args
         else:
             assert isinstance(args, Sequence)
-            command, *args = (expand_env_vars(arg, env=process_env) for arg in args)
+            command, *args = (expand_env_vars(arg) for arg in args)
             if command.endswith(".py"):
                 args = [command, *args]
                 command = str(project_env.interpreter.executable)
@@ -281,7 +278,7 @@ class TaskRunner:
             ):
                 # The executable belongs to the local packages directory.
                 # Don't load system site-packages
-                process_env["NO_SITE_PACKAGES"] = "1"
+                os.environ["NO_SITE_PACKAGES"] = "1"
 
         cwd = (project.root / working_dir) if working_dir else project.root if chdir else None
 
@@ -290,13 +287,15 @@ class TaskRunner:
                 signum = signal.SIGTERM
             process.send_signal(signum)
 
+        process_env = os.environ.copy()
+        process_env.update({"PDM_RUN_CWD": str(Path.cwd())})
         handle_term = signal.signal(signal.SIGTERM, forward_signal)
         handle_int = signal.signal(signal.SIGINT, forward_signal)
-        process = subprocess.Popen(process_cmd, cwd=cwd, env=process_env, shell=shell, bufsize=0)
-        process.wait()
+        process = subprocess.Popen(process_cmd, cwd=cwd, shell=shell, bufsize=0, close_fds=False, env=process_env)
+        retcode = process.wait()
         signal.signal(signal.SIGTERM, handle_term)
         signal.signal(signal.SIGINT, handle_int)
-        return process.returncode
+        return retcode
 
     def run_task(
         self, task: Task, args: Sequence[str] = (), opts: TaskOptions | None = None, seen: set[str] | None = None
@@ -342,11 +341,8 @@ class TaskRunner:
         elif kind == "composite":
             assert isinstance(value, list)
 
-        self.project.core.ui.echo(
-            f"Running {task}: [success]{args}[/]",
-            err=True,
-            verbosity=termui.Verbosity.DETAIL,
-        )
+        self.display_task(task, args)
+
         if kind == "composite":
             args = list(args)
             should_interpolate = any(RE_ARGS_PLACEHOLDER.search(script) for script in value)
@@ -366,6 +362,19 @@ class TaskRunner:
                     composite_code = code
             return composite_code
         return self._run_process(args, chdir=True, shell=shell, **merge_options(self.global_options, options, opts))  # type: ignore[misc]
+
+    def display_task(self, task: Task, args: Sequence[str]) -> None:
+        """Display a task given current verbosity and settings"""
+        is_verbose = self.project.core.ui.verbosity >= termui.Verbosity.DETAIL
+        if not (is_verbose or self.project.config.get("scripts.show_header")):
+            return
+        args = task.args if task.kind == "composite" else args
+        content = args if is_verbose else task.short_description
+        self.project.core.ui.echo(
+            f"Running {task}: [success]{content}[/]",
+            err=True,
+            verbosity=termui.Verbosity.NORMAL,
+        )
 
     def run(
         self,

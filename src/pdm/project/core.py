@@ -2,20 +2,20 @@ from __future__ import annotations
 
 import contextlib
 import hashlib
+import itertools
 import operator
 import os
 import re
 import shutil
 import sys
+from copy import deepcopy
 from functools import cached_property, reduce
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable, Iterable, Mapping, Sequence, cast
 
 import tomlkit
 from pbs_installer import PythonVersion
-from tomlkit.items import Array
 
-from pdm import termui
 from pdm._types import NotSet, NotSetType, RepositoryConfig
 from pdm.compat import CompatibleSequence
 from pdm.exceptions import NoPythonVersion, PdmUsageError, ProjectError
@@ -27,7 +27,7 @@ from pdm.models.repositories import BaseRepository, LockedRepository
 from pdm.models.requirements import Requirement, parse_line, parse_requirement, strip_extras
 from pdm.models.specifiers import PySpecSet
 from pdm.project.config import Config, ensure_boolean
-from pdm.project.lockfile import Lockfile
+from pdm.project.lockfile import FLAG_INHERIT_METADATA, Lockfile
 from pdm.project.project_file import PyProject
 from pdm.utils import (
     cd,
@@ -40,19 +40,20 @@ from pdm.utils import (
     is_conda_base,
     is_conda_base_python,
     is_path_relative_to,
-    path_to_url,
+    normalize_name,
 )
 
 if TYPE_CHECKING:
     from findpython import Finder
-    from resolvelib.reporters import BaseReporter
 
-    from pdm._types import Spinner
     from pdm.core import Core
     from pdm.environments import BaseEnvironment
+    from pdm.installers.base import BaseSynchronizer
     from pdm.models.caches import CandidateInfoCache, HashCache, WheelCache
     from pdm.models.candidates import Candidate
+    from pdm.resolver.base import Resolver
     from pdm.resolver.providers import BaseProvider
+    from pdm.resolver.reporters import RichLockReporter
 
 
 PYENV_ROOT = os.path.expanduser(os.getenv("PYENV_ROOT", "~/.pyenv"))
@@ -127,11 +128,16 @@ class Project:
     @property
     def lockfile(self) -> Lockfile:
         if self._lockfile is None:
-            self._lockfile = Lockfile(self.root / self.LOCKFILE_FILENAME, ui=self.core.ui)
+            self.set_lockfile(self.root / self.LOCKFILE_FILENAME)
+            assert self._lockfile is not None
         return self._lockfile
 
     def set_lockfile(self, path: str | Path) -> None:
         self._lockfile = Lockfile(path, ui=self.core.ui)
+        if self.config.get("use_uv"):
+            self._lockfile.default_strategies.discard(FLAG_INHERIT_METADATA)
+        if not self.config["strategy.inherit_metadata"]:
+            self._lockfile.default_strategies.discard(FLAG_INHERIT_METADATA)
 
     @cached_property
     def config(self) -> Mapping[str, Any]:
@@ -220,14 +226,15 @@ class Project:
 
         config = self.config
         saved_path = self._saved_python
-        if saved_path and not os.getenv("PDM_IGNORE_SAVED_PYTHON"):
+        if saved_path and not ensure_boolean(os.getenv("PDM_IGNORE_SAVED_PYTHON")):
             python = PythonInfo.from_path(saved_path)
             if match_version(python):
                 return python
+            elif not python.valid:
+                note("The saved Python interpreter does not exist or broken. Trying to find another one.")
             else:
                 note(
-                    "The saved Python interpreter doesn't match the project's requirement. "
-                    "Trying to find another one."
+                    "The saved Python interpreter doesn't match the project's requirement. Trying to find another one."
                 )
             self._saved_python = None  # Clear the saved path if it doesn't match
 
@@ -292,6 +299,8 @@ class Project:
         from pdm.cli.commands.venv.backends import BACKENDS
 
         backend: str = self.config["venv.backend"]
+        if backend == "virtualenv" and self.config["use_uv"]:
+            backend = "uv"
         venv_backend = BACKENDS[backend](self, python)
         path = venv_backend.create(
             force=True,
@@ -316,58 +325,140 @@ class Project:
     def python_requires(self) -> PySpecSet:
         return PySpecSet(self.pyproject.metadata.get("requires-python", ""))
 
-    def get_dependencies(self, group: str | None = None) -> Sequence[Requirement]:
-        metadata = self.pyproject.metadata
-        group = group or "default"
-        optional_dependencies = metadata.get("optional-dependencies", {})
-        dev_dependencies = self.pyproject.settings.get("dev-dependencies", {})
-        in_metadata = group == "default" or group in optional_dependencies
-        if group == "default":
-            deps = metadata.get("dependencies", [])
-        else:
-            if group in optional_dependencies and group in dev_dependencies:
-                self.core.ui.info(
-                    f"The {group} group exists in both \\[optional-dependencies] "
-                    "and \\[dev-dependencies], the former is taken."
-                )
-            if group in optional_dependencies:
-                deps = optional_dependencies[group]
-            elif group in dev_dependencies:
-                deps = dev_dependencies[group]
-            else:
-                raise PdmUsageError(f"Non-exist group {group}")
-        result = []
-        with cd(self.root):
-            for line in deps:
-                if line.startswith("-e ") and in_metadata:
-                    self.core.ui.warn(
-                        f"Skipping editable dependency [b]{line}[/] in the"
-                        r" [success]\[project][/] table. Please move it to the "
-                        r"[success]\[tool.pdm.dev-dependencies][/] table"
-                    )
-                    continue
-                req = parse_line(line)
-                req.groups = [group]
-                # make editable packages behind normal ones to override correctly.
-                result.append(req)
-        return CompatibleSequence(result)
+    def get_dependencies(
+        self, group: str | None = None, all_dependencies: dict[str, list[Requirement]] | None = None
+    ) -> Sequence[Requirement]:
+        group = normalize_name(group or "default")
+        if all_dependencies is None:
+            all_dependencies = self._resolve_dependencies([group])
+        if group not in all_dependencies:
+            raise ProjectError(f"Dependency group {group} does not exist")
+        return CompatibleSequence(all_dependencies[group])
 
     def iter_groups(self) -> Iterable[str]:
         groups = {"default"}
         if self.pyproject.metadata.get("optional-dependencies"):
             groups.update(self.pyproject.metadata["optional-dependencies"].keys())
-        if self.pyproject.settings.get("dev-dependencies"):
-            groups.update(self.pyproject.settings["dev-dependencies"].keys())
-        return groups
+        groups.update(self.pyproject._data.get("dependency-groups", {}).keys())
+        groups.update(self.pyproject.settings.get("dev-dependencies", {}).keys())
+        return {normalize_name(g) for g in groups}
+
+    def _resolve_dependencies(
+        self, requested_groups: list[str] | None = None, include_referred: bool = True
+    ) -> dict[str, list[Requirement]]:
+        """Resolve dependencies for the given groups, and return a list of requirements for each group.
+
+        The .groups attribute will be set to all that refers this requirement directly or indirectly.
+        If `include_referred` is True, all self-references and `include-group` will be expanded to
+        corresponding requirements. Otherwise, each group only contains explicitly defined requirements.
+        """
+
+        def _get_dependencies(group: str) -> tuple[list[Requirement], set[str]]:
+            in_metadata = group in metadata_dependencies
+            collected_deps: list[str] = []
+            referred: set[str] = set()
+            deps = metadata_dependencies.get(group, []) if in_metadata else dev_dependencies[group]
+            for item in deps:
+                if isinstance(item, str):
+                    try:
+                        name, extras = strip_extras(item)
+                    except AssertionError:
+                        pass
+                    else:
+                        if normalize_name(name) == project_name:
+                            if extras:
+                                allowed = (
+                                    set(metadata_dependencies)
+                                    if in_metadata
+                                    else {*metadata_dependencies, *dev_dependencies}
+                                )
+                                extras = tuple(normalize_name(extra) for extra in extras)
+                                not_allowed = set(extras) - allowed
+                                if not_allowed:
+                                    raise ProjectError(
+                                        f"Optional dependency group '{group}' cannot "
+                                        f"include non-existing extras: [{','.join(not_allowed)}]"
+                                    )
+                                referred.update(extras)
+                            continue
+                    collected_deps.append(item)
+                elif not in_metadata and isinstance(item, dict):
+                    if tuple(item.keys()) != ("include-group",):
+                        raise ProjectError(f"Invalid dependency group item: {item}")
+                    include_group = normalize_name(item["include-group"])
+                    if include_group not in dev_dependencies:
+                        raise ProjectError(f"Missing group '{include_group}' in `include-group`")
+                    referred.add(include_group)
+                else:
+                    raise ProjectError(f"Invalid dependency in group {group}: {item}")
+            result: list[Requirement] = []
+            with cd(self.root):
+                for line in collected_deps:
+                    if line.startswith("-e ") and in_metadata:
+                        self.core.ui.warn(
+                            f"Skipping editable dependency [b]{line}[/] in the"
+                            r" [success]\[project][/] table. Please move it to the "
+                            r"[success]\[tool.pdm.dev-dependencies][/] table"
+                        )
+                        continue
+                    req = parse_line(line)
+                    req.groups = [group]
+                    # make editable packages behind normal ones to override correctly.
+                    result.append(req)
+            return result, referred
+
+        if requested_groups is None:
+            requested_groups = list(self.iter_groups())
+        requested_groups = [normalize_name(g) for g in requested_groups]
+        referred_groups: dict[str, set[str]] = {}
+        metadata_dependencies = {
+            normalize_name(k): v for k, v in self.pyproject.metadata.get("optional-dependencies", {}).items()
+        }
+        metadata_dependencies["default"] = self.pyproject.metadata.get("dependencies", [])
+        dev_dependencies = self.pyproject.dev_dependencies
+        group_deps: dict[str, list[Requirement]] = {}
+        project_name = normalize_name(self.name) if self.name else None
+        for group in requested_groups:
+            deps, referred = _get_dependencies(group)
+            group_deps[group] = deps
+            if referred:
+                referred_groups[group] = referred
+        extra_deps: dict[str, list[Requirement]] = {}
+        while referred_groups:
+            updated = False
+            for group, referred in list(referred_groups.items()):
+                for ref in list(referred):
+                    if ref not in requested_groups:
+                        deps, r = _get_dependencies(ref)
+                        group_deps[ref] = deps
+                        if r:
+                            referred_groups[ref] = r
+                        requested_groups.append(ref)
+                    if ref in referred_groups:  # not resolved yet
+                        continue
+                    extra_deps.setdefault(group, []).extend(group_deps[ref])
+                    for req in itertools.chain(group_deps[ref], extra_deps.get(ref, [])):
+                        if group not in req.groups:
+                            req.groups.append(group)
+                    referred.remove(ref)
+                    updated = True
+                if not referred:
+                    referred_groups.pop(group)
+            if not updated:
+                raise ProjectError("Cyclic dependency group include detected")
+        if include_referred:
+            for group, deps in extra_deps.items():
+                group_deps[group].extend(deps)
+        return group_deps
 
     @property
     def all_dependencies(self) -> dict[str, Sequence[Requirement]]:
-        return {group: self.get_dependencies(group) for group in self.iter_groups()}
+        return {k: CompatibleSequence(v) for k, v in self._resolve_dependencies(include_referred=False).items()}
 
     @property
     def default_source(self) -> RepositoryConfig:
         """Get the default source from the pypi setting"""
-        return RepositoryConfig(
+        config = RepositoryConfig(
             config_prefix="pypi",
             name="pypi",
             url=self.config["pypi.url"],
@@ -378,9 +469,13 @@ class Project:
             client_cert=self.config.get("pypi.client_cert"),
             client_key=self.config.get("pypi.client_key"),
         )
+        return config
 
     @property
     def sources(self) -> list[RepositoryConfig]:
+        return self.get_sources(include_stored=not self.config.get("pypi.ignore_stored_index", False))
+
+    def get_sources(self, expand_env: bool = True, include_stored: bool = False) -> list[RepositoryConfig]:
         result: dict[str, RepositoryConfig] = {}
         for source in self.pyproject.settings.get("source", []):
             result[source["name"]] = RepositoryConfig(**source, config_prefix="pypi")
@@ -390,21 +485,23 @@ class Project:
                 name = source.name
                 if name in result:
                     result[name].passive_update(source)
-                else:
+                elif include_stored:
                     result[name] = source
 
-        if not self.config.get("pypi.ignore_stored_index", False):
-            if "pypi" not in result:  # put pypi source at the beginning
-                result = {"pypi": self.default_source, **result}
-            else:
-                result["pypi"].passive_update(self.default_source)
-            merge_sources(self.project_config.iter_sources())
-            merge_sources(self.global_config.iter_sources())
+        merge_sources(self.project_config.iter_sources())
+        merge_sources(self.global_config.iter_sources())
+        if "pypi" in result:
+            result["pypi"].passive_update(self.default_source)
+        elif include_stored:
+            # put pypi source at the beginning
+            result = {"pypi": self.default_source, **result}
+
         sources: list[RepositoryConfig] = []
         for source in result.values():
             if not source.url:
                 continue
-            source.url = DEFAULT_BACKEND(self.root).expand_line(expand_env_vars_in_auth(source.url))
+            if expand_env:
+                source.url = DEFAULT_BACKEND(self.root).expand_line(expand_env_vars_in_auth(source.url))
             sources.append(source)
         return sources
 
@@ -459,7 +556,7 @@ class Project:
 
         import inspect
 
-        from pdm.resolver.providers import BaseProvider, get_provider
+        from pdm.resolver.providers import get_provider
 
         if env_spec is None:
             env_spec = (
@@ -474,16 +571,9 @@ class Project:
             try:
                 locked_repository = self.get_locked_repository(env_spec)
             except Exception:  # pragma: no cover
-                if for_install:
-                    raise
                 if strategy != "all":
                     self.core.ui.warn("Unable to reuse the lock file as it is not compatible with PDM")
 
-        if for_install:
-            assert locked_repository is not None
-            return BaseProvider(
-                locked_repository, direct_minimal_versions=direct_minimal_versions, locked_candidates={}
-            )
         provider_class = get_provider(strategy)
         params: dict[str, Any] = {}
         if strategy != "all":
@@ -495,11 +585,8 @@ class Project:
         return provider_class(repository=repository, direct_minimal_versions=direct_minimal_versions, **params)
 
     def get_reporter(
-        self,
-        requirements: list[Requirement],
-        tracked_names: Iterable[str] | None = None,
-        spinner: Spinner | None = None,
-    ) -> BaseReporter:
+        self, requirements: list[Requirement], tracked_names: Iterable[str] | None = None
+    ) -> RichLockReporter:  # pragma: no cover
         """Return the reporter object to construct a resolver.
 
         :param requirements: requirements to resolve
@@ -507,12 +594,9 @@ class Project:
         :param spinner: optional spinner object
         :returns: a reporter
         """
-        from pdm.resolver.reporters import SpinnerReporter
+        from pdm.resolver.reporters import RichLockReporter
 
-        if spinner is None:
-            spinner = termui.SilentSpinner("")
-
-        return SpinnerReporter(spinner, requirements)
+        return RichLockReporter(requirements, self.core.ui)
 
     def get_lock_metadata(self) -> dict[str, Any]:
         content_hash = "sha256:" + self.pyproject.content_hash("sha256")
@@ -533,7 +617,7 @@ class Project:
 
         from pdm.models.candidates import Candidate
 
-        req = parse_requirement(path_to_url(self.root.as_posix()), editable)
+        req = parse_requirement(self.root.as_uri(), editable)
         assert self.name
         req.name = self.name
         can = Candidate(req, name=self.name, link=Link.from_path(self.root))
@@ -555,11 +639,26 @@ class Project:
         Return a tuple of two elements, the first is the dependencies array,
         and the second value is a callable to set the dependencies array back.
         """
+        from pdm.formats.base import make_array
 
         def update_dev_dependencies(deps: list[str]) -> None:
             from tomlkit.container import OutOfOrderTableProxy
 
-            settings.setdefault("dev-dependencies", {})[group] = deps
+            dependency_groups: list[str | dict[str, str]] = tomlkit.array().multiline(True)
+            dev_dependencies: list[str] = tomlkit.array().multiline(True)
+            for dep in deps:
+                if isinstance(dep, str) and dep.startswith("-e"):
+                    dev_dependencies.append(dep)
+                else:
+                    dependency_groups.append(dep)
+            if dependency_groups:
+                self.pyproject.dependency_groups[group] = dependency_groups
+            else:
+                self.pyproject.dependency_groups.pop(group, None)
+            if dev_dependencies:
+                settings.setdefault("dev-dependencies", {})[group] = dev_dependencies
+            else:
+                settings.setdefault("dev-dependencies", {}).pop(group, None)
             if isinstance(self.pyproject._data["tool"], OutOfOrderTableProxy):
                 # In case of a separate table, we have to remove and re-add it to make the write correct.
                 # This may change the order of tables in the TOML file, but it's the best we can do.
@@ -570,18 +669,27 @@ class Project:
         metadata, settings = self.pyproject.metadata, self.pyproject.settings
         if group == "default":
             return metadata.get("dependencies", tomlkit.array()), lambda x: metadata.__setitem__("dependencies", x)
+        dev_dependencies = deepcopy(self.pyproject._data.get("dependency-groups", {}))
+        for dev_group, items in self.pyproject.settings.get("dev-dependencies", {}).items():
+            dev_dependencies.setdefault(dev_group, []).extend(items)
         deps_setter = [
             (
                 metadata.get("optional-dependencies", {}),
-                lambda x: metadata.setdefault("optional-dependencies", {}).__setitem__(group, x),
+                lambda x: metadata.setdefault("optional-dependencies", {}).__setitem__(group, x)
+                if x
+                else metadata.setdefault("optional-dependencies", {}).pop(group, None),
             ),
-            (settings.get("dev-dependencies", {}), update_dev_dependencies),
+            (dev_dependencies, update_dev_dependencies),
         ]
+        normalized_group = normalize_name(group)
         for deps, setter in deps_setter:
+            normalized_groups = {normalize_name(g) for g in deps}
             if group in deps:
-                return deps[group], setter
+                return make_array(deps[group], True), setter
+            if normalized_group in normalized_groups:
+                raise PdmUsageError(f"Group {group} already exists in another non-normalized form")
         # If not found, return an empty list and a setter to add the group
-        return tomlkit.array(), deps_setter[int(dev)][1]
+        return tomlkit.array().multiline(True), deps_setter[int(dev)][1]
 
     def add_dependencies(
         self,
@@ -594,20 +702,24 @@ class Project:
         """Add requirements to the given group, and return the requirements of that group."""
         if isinstance(requirements, Mapping):  # pragma: no cover
             deprecation_warning(
-                "Passing a requirements map to add_dependencies is deprecated, " "please pass an iterable", stacklevel=2
+                "Passing a requirements map to add_dependencies is deprecated, please pass an iterable", stacklevel=2
             )
             requirements = requirements.values()
         deps, setter = self.use_pyproject_dependencies(to_group, dev)
         updated_indices: set[int] = set()
 
         with cd(self.root):
-            parsed_deps = [parse_line(dep) for dep in deps]
+            parsed_deps = [(parse_line(dep) if isinstance(dep, str) else None) for dep in deps]
 
             for req in requirements:
                 if isinstance(req, str):
                     req = parse_line(req)
                 matched_index = next(
-                    (i for i, r in enumerate(deps) if req.matches(r) and i not in updated_indices),
+                    (
+                        i
+                        for i, r in enumerate(deps)
+                        if isinstance(r, str) and req.matches(r) and i not in updated_indices
+                    ),
                     None,
                 )
                 dep = req.as_line()
@@ -619,12 +731,13 @@ class Project:
                     deps[matched_index] = dep
                     parsed_deps[matched_index] = req
                     updated_indices.add(matched_index)
-        setter(cast(Array, deps).multiline(True))
+        setter(deps)
         if write:
             self.pyproject.write(show_message)
         for r in parsed_deps:
-            r.groups = [to_group]
-        return parsed_deps
+            if r is not None:
+                r.groups = [to_group]
+        return [r for r in parsed_deps if r is not None]
 
     def init_global_project(self) -> None:
         if not self.is_global or not self.pyproject.empty():
@@ -676,13 +789,26 @@ class Project:
         python_spec: str | None = None,
         search_venv: bool | None = None,
         filter_func: Callable[[PythonInfo], bool] | None = None,
+        respect_version_file: bool = True,
     ) -> Iterable[PythonInfo]:
         """Iterate over all interpreters that matches the given specifier.
         And optionally install the interpreter if not found.
         """
+        from packaging.version import InvalidVersion
+
         from pdm.cli.commands.python import InstallCommand
 
         found = False
+        if (
+            respect_version_file
+            and not python_spec
+            and (os.getenv("PDM_PYTHON_VERSION") or self.root.joinpath(".python-version").exists())
+        ):
+            requested = os.getenv("PDM_PYTHON_VERSION") or self.root.joinpath(".python-version").read_text().strip()
+            if requested not in self.python_requires:
+                self.core.ui.warn(".python-version is found but the version is not in requires-python, ignored.")
+            else:
+                python_spec = requested
         for interpreter in self.find_interpreters(python_spec, search_venv):
             if filter_func is None or filter_func(interpreter):
                 found = True
@@ -696,7 +822,12 @@ class Project:
             if best_match is None:
                 return
             python_spec = str(best_match)
-
+        else:
+            try:
+                if python_spec not in self.python_requires:
+                    return
+            except InvalidVersion:
+                return
         try:
             # otherwise if no interpreter is found, try to install it
             installed = InstallCommand.install_python(self, python_spec)
@@ -748,7 +879,7 @@ class Project:
                         return
             finder_arg = python_spec
         if search_venv is None:
-            search_venv = config["python.use_venv"]
+            search_venv = cast(bool, config["python.use_venv"])
         finder = self._get_python_finder(search_venv)
         for entry in finder.find_all(finder_arg, allow_prereleases=True):
             yield PythonInfo(entry)
@@ -790,7 +921,7 @@ class Project:
         if "package-type" in settings:
             return settings["package-type"] == "library"
         elif "distribution" in settings:
-            return settings["distribution"]
+            return cast(bool, settings["distribution"])
         else:
             return True
 
@@ -802,7 +933,7 @@ class Project:
         """
         try:
             return reduce(operator.getitem, key.split("."), self.pyproject.settings)
-        except tomlkit.exceptions.NonExistentKey:
+        except KeyError:
             return None
 
     def env_or_setting(self, var: str, key: str) -> Any:
@@ -839,3 +970,24 @@ class Project:
     @property
     def lock_targets(self) -> list[EnvSpec]:
         return [self.environment.allow_all_spec]
+
+    def get_resolver(self, allow_uv: bool = True) -> type[Resolver]:
+        """Get the resolver class to use for the project."""
+        from pdm.resolver.resolvelib import RLResolver
+        from pdm.resolver.uv import UvResolver
+
+        if allow_uv and self.config.get("use_uv"):
+            return UvResolver
+        else:
+            return RLResolver
+
+    def get_synchronizer(self, quiet: bool = False, allow_uv: bool = True) -> type[BaseSynchronizer]:
+        """Get the synchronizer class to use for the project."""
+        from pdm.installers import BaseSynchronizer, Synchronizer, UvSynchronizer
+        from pdm.installers.uv import QuietUvSynchronizer
+
+        if allow_uv and self.config.get("use_uv"):
+            return QuietUvSynchronizer if quiet else UvSynchronizer
+        if quiet:
+            return BaseSynchronizer
+        return getattr(self.core, "synchronizer_class", Synchronizer)

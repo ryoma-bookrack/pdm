@@ -11,7 +11,7 @@ from pdm.models.search import SearchResultParser
 if TYPE_CHECKING:
     from typing import Callable, Iterable
 
-    from pdm._types import SearchResult
+    from pdm._types import SearchResults
 
 
 class PyPIRepository(BaseRepository):
@@ -51,7 +51,6 @@ class PyPIRepository(BaseRepository):
 
     def dependency_generators(self) -> Iterable[Callable[[Candidate], CandidateMetadata]]:
         yield self._get_dependencies_from_cache
-        yield self._get_dependencies_from_local_package
         if self.environment.project.config["pypi.json_api"]:
             yield self._get_dependencies_from_json
         yield self._get_dependencies_from_metadata
@@ -73,7 +72,7 @@ class PyPIRepository(BaseRepository):
             )
         return cans
 
-    def search(self, query: str) -> SearchResult:
+    def search(self, query: str) -> SearchResults:
         pypi_simple = self.sources[0].url.rstrip("/")  # type: ignore[union-attr]
 
         if pypi_simple.endswith("/simple"):
@@ -89,7 +88,7 @@ class PyPIRepository(BaseRepository):
                 f"to {self.DEFAULT_INDEX_URL!r} now.\n"
                 "This may take longer depending on your network condition.",
             )
-            resp = session.get(f"{self.DEFAULT_INDEX_URL}/search", params={"q": query})
+            resp = session.get(f"{self.DEFAULT_INDEX_URL}/search/", params={"q": query}, follow_redirects=True)
         parser = SearchResultParser()
         resp.raise_for_status()
         parser.feed(resp.text)

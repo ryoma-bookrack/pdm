@@ -39,10 +39,8 @@ class Backend(abc.ABC):
                 return project_python
 
         def match_func(py_version: PythonInfo) -> bool:
-            return (
-                bool(self.python)
-                or py_version.valid
-                and self.project.python_requires.contains(py_version.version, True)
+            return bool(self.python) or (
+                py_version.valid and self.project.python_requires.contains(py_version.version, True)
             )
 
         for py_version in self.project.iter_interpreters(self.python, search_venv=False, filter_func=match_func):
@@ -169,6 +167,26 @@ class VenvBackend(VirtualenvBackend):
         self.subprocess_call(cmd)
 
 
+class UvBackend(VirtualenvBackend):
+    def pip_args(self, with_pip: bool) -> Iterable[str]:
+        if with_pip:
+            return ("--seed", "pip")
+        return ()
+
+    def perform_create(self, location: Path, args: tuple[str, ...], prompt: str | None = None) -> None:
+        prompt_option = (f"--prompt={prompt}",) if prompt else ()
+        cmd = [
+            *self.project.core.uv_cmd,
+            "venv",
+            "-p",
+            str(self._resolved_interpreter.executable),
+            *prompt_option,
+            *args,
+            str(location),
+        ]
+        self.subprocess_call(cmd)
+
+
 class CondaBackend(Backend):
     @property
     def ident(self) -> str:
@@ -200,4 +218,5 @@ BACKENDS: Mapping[str, type[Backend]] = {
     "virtualenv": VirtualenvBackend,
     "venv": VenvBackend,
     "conda": CondaBackend,
+    "uv": UvBackend,
 }

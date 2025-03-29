@@ -10,7 +10,7 @@ import pytest
 from pdm import termui
 from pdm.cli import actions
 from pdm.cli.utils import get_pep582_path
-from pdm.utils import cd, path_to_url
+from pdm.utils import cd
 
 
 @pytest.fixture
@@ -648,15 +648,15 @@ def test_composite_inherit_env(project, pdm, capfd, _echo):
             "cmd": "python echo.py Third VAR",
             "env": {"VAR": "42"},
         },
-        "test": {"composite": ["first", "second", "nested"], "env": {"VAR": "overriden"}},
+        "test": {"composite": ["first", "second", "nested"], "env": {"VAR": "overridden"}},
     }
     project.pyproject.write()
     capfd.readouterr()
     pdm(["run", "test"], strict=True, obj=project)
     out, _ = capfd.readouterr()
-    assert "First CALLED with VAR=overriden" in out
-    assert "Second CALLED with VAR=overriden" in out
-    assert "Third CALLED with VAR=overriden" in out
+    assert "First CALLED with VAR=overridden" in out
+    assert "Second CALLED with VAR=overridden" in out
+    assert "Third CALLED with VAR=overridden" in out
 
 
 def test_composite_fail_on_first_missing_task(project, pdm, capfd, _echo):
@@ -811,15 +811,15 @@ def test_composite_hooks_inherit_env(project, pdm, capfd, _echo):
         "pre_task": {"cmd": "python echo.py Pre-Task VAR", "env": {"VAR": "42"}},
         "task": "python echo.py Task",
         "post_task": {"cmd": "python echo.py Post-Task VAR", "env": {"VAR": "42"}},
-        "test": {"composite": ["task"], "env": {"VAR": "overriden"}},
+        "test": {"composite": ["task"], "env": {"VAR": "overridden"}},
     }
     project.pyproject.write()
     capfd.readouterr()
     pdm(["run", "test"], strict=True, obj=project)
     out, _ = capfd.readouterr()
-    assert "Pre-Task CALLED with VAR=overriden" in out
+    assert "Pre-Task CALLED with VAR=overridden" in out
     assert "Task CALLED" in out
-    assert "Post-Task CALLED with VAR=overriden" in out
+    assert "Post-Task CALLED with VAR=overridden" in out
 
 
 def test_composite_inherit_env_in_cascade(project, pdm, capfd, _echo):
@@ -837,20 +837,20 @@ def test_composite_inherit_env_in_cascade(project, pdm, capfd, _echo):
             "cmd": "python echo.py Post-Task VAR FOO TIK",
             "env": {"VAR": "42", "FOO": "foobar"},
         },
-        "test": {"composite": ["task"], "env": {"VAR": "overriden"}},
+        "test": {"composite": ["task"], "env": {"VAR": "overridden"}},
     }
     project.pyproject.write()
     capfd.readouterr()
     pdm(["run", "test"], strict=True, obj=project)
     out, _ = capfd.readouterr()
-    assert "Pre-Task CALLED with VAR=overriden FOO=foobar TIK=TOK" in out
-    assert "Task CALLED with VAR=overriden FOO=foobar TIK=TOK" in out
-    assert "Post-Task CALLED with VAR=overriden FOO=foobar TIK=TOK" in out
+    assert "Pre-Task CALLED with VAR=overridden FOO=foobar TIK=TOK" in out
+    assert "Task CALLED with VAR=overridden FOO=foobar TIK=TOK" in out
+    assert "Post-Task CALLED with VAR=overridden FOO=foobar TIK=TOK" in out
 
 
 def test_composite_inherit_dotfile(project, pdm, capfd, _echo):
     (project.root / ".env").write_text("VAR=42")
-    (project.root / "override.env").write_text("VAR=overriden")
+    (project.root / "override.env").write_text("VAR=overridden")
     project.pyproject.settings["scripts"] = {
         "pre_task": {"cmd": "python echo.py Pre-Task VAR", "env_file": ".env"},
         "task": {"cmd": "python echo.py Task VAR", "env_file": ".env"},
@@ -861,9 +861,22 @@ def test_composite_inherit_dotfile(project, pdm, capfd, _echo):
     capfd.readouterr()
     pdm(["run", "test"], strict=True, obj=project)
     out, _ = capfd.readouterr()
-    assert "Pre-Task CALLED with VAR=overriden" in out
-    assert "Task CALLED with VAR=overriden" in out
-    assert "Post-Task CALLED with VAR=overriden" in out
+    assert "Pre-Task CALLED with VAR=overridden" in out
+    assert "Task CALLED with VAR=overridden" in out
+    assert "Post-Task CALLED with VAR=overridden" in out
+
+
+def test_resolve_env_vars_in_dotfile(project, pdm, capfd, _echo):
+    (project.root / ".env").write_text("VAR=42\nFOO=${OUT}/${VAR}")
+    project.pyproject.settings["scripts"] = {
+        "_": {"env_file": ".env"},
+        "test": {"cmd": "python echo.py Task FOO BAR", "env": {"BAR": "${FOO}/bar"}},
+    }
+    project.pyproject.write()
+    capfd.readouterr()
+    pdm(["run", "test"], strict=True, obj=project, env={"OUT": "hello"})
+    out, _ = capfd.readouterr()
+    assert "Task CALLED with FOO=hello/42 BAR=hello/42/bar" in out
 
 
 def test_composite_can_have_commands(project, pdm, capfd):
@@ -910,7 +923,7 @@ def test_run_shortcuts_dont_override_commands(project, pdm, capfd, mocker):
 def test_run_shortcut_fail_with_usage_if_script_not_found(project, pdm):
     result = pdm(["whatever"], obj=project)
     assert result.exit_code != 0
-    assert "Script unknown: whatever" in result.stderr
+    assert "Command not found: whatever" in result.stderr
     assert "Usage" in result.stderr
 
 
@@ -921,7 +934,7 @@ def test_run_shortcut_fail_with_usage_if_script_not_found(project, pdm):
         pytest.param(["pip", "--version"], id="not an user script"),
     ],
 )
-def test_empty_positionnal_args_still_display_usage(project, pdm, args):
+def test_empty_positional_args_still_display_usage(project, pdm, args):
     result = pdm(args, obj=project)
     assert result.exit_code != 0
     assert "Usage" in result.stderr
@@ -959,12 +972,12 @@ def test_run_script_with_inline_metadata(project, pdm, local_finder, local_finde
         result = pdm(["run", "test_script.py"], obj=project)
         assert result.exit_code != 0
 
-    local_artifacts_url = path_to_url(str(local_finder_artifacts))
+    local_artifacts_url = local_finder_artifacts.as_uri()
 
     project.root.joinpath("test_script.py").write_text(
         textwrap.dedent(f"""\
         # /// script
-        # requires-python = ">=3.8"
+        # requires-python = ">=3.9"
         # dependencies = [
         #   "first",
         # ]
@@ -982,3 +995,142 @@ def test_run_script_with_inline_metadata(project, pdm, local_finder, local_finde
     with cd(project.root):
         result = pdm(["run", "test_script.py"], obj=project)
         assert result.exit_code == 0
+
+
+def test_run_script_pass_run_cwd(project, pdm, capfd):
+    project.pyproject.settings["scripts"] = {
+        "test_script": [
+            "python",
+            "-c",
+            "import os;print(os.getenv('PDM_RUN_CWD'))",
+        ]
+    }
+    project.pyproject.write()
+    capfd.readouterr()
+    result = pdm(["run", "test_script"], obj=project)
+    assert result.exit_code == 0
+    out, _ = capfd.readouterr()
+    assert Path(out.strip()) == Path.cwd()
+
+
+def test_run_script_pass_run_cwd_to_original_working_dir_when_working_dir_of_script_is_changed(project, pdm, capfd):
+    project.root.joinpath("subdir").mkdir()
+    project.root.joinpath("subdir", "test_script.py").write_text(
+        textwrap.dedent("""\
+           import os
+           print(os.getenv('PDM_RUN_CWD', ''))
+        """)
+    )
+    project.pyproject.settings["scripts"] = {
+        "test_script": {"working_dir": "subdir", "cmd": "python test_script.py"},
+    }
+    project.pyproject.write()
+    capfd.readouterr()
+    pdm(["run", "test_script"], obj=project, strict=True)
+    assert capfd.readouterr()[0].strip() == str(Path.cwd())
+
+
+def test_run_script_default_verbosity(project, pdm):
+    project.pyproject.settings["scripts"] = {"test": {"cmd": "python -V", "help": "help"}}
+    project.pyproject.write()
+
+    result = pdm(["run", "test"], strict=True, obj=project)
+
+    assert "task test" not in result.stderr
+    assert "['python', '-V']" not in result.stderr
+    assert "help" not in result.stderr
+
+
+def test_run_script_default_verbosity_with_show_header(project, pdm):
+    project.project_config.update({"scripts.show_header": True})
+    project.pyproject.settings["scripts"] = {"test": {"cmd": "python -V", "help": "help"}}
+    project.pyproject.write()
+
+    result = pdm(["run", "test"], strict=True, obj=project)
+
+    assert "task test" in result.stderr
+    assert "['python', '-V']" not in result.stderr
+    assert "python -V" not in result.stderr
+    assert "help" in result.stderr
+
+
+def test_run_script_default_verbosity_with_show_header_no_help(project, pdm):
+    project.project_config.update({"scripts.show_header": True})
+    project.pyproject.settings["scripts"] = {"test": {"cmd": "python -V"}}
+    project.pyproject.write()
+
+    result = pdm(["run", "test"], strict=True, obj=project)
+
+    assert "task test" in result.stderr
+    assert "python -V" in result.stderr
+    assert "['python', '-V']" not in result.stderr
+
+
+def test_run_script_verbose(project, pdm):
+    project.pyproject.settings["scripts"] = {"test": {"cmd": "python -V", "help": "help"}}
+    project.pyproject.write()
+
+    result = pdm(["run", "-v", "test"], strict=True, obj=project)
+
+    assert "task test" in result.stderr
+    assert "['python', '-V']" in result.stderr
+    assert "python -V" not in result.stderr
+    assert "help" not in result.stderr
+
+
+def test_run_composite_script_default_verbosity_with_show_header(project, pdm):
+    project.project_config.update({"scripts.show_header": True})
+    project.pyproject.settings["scripts"] = {
+        "test": {"cmd": "python -V", "help": "help"},
+        "parent": {"composite": ["test", "test"]},
+    }
+    project.pyproject.write()
+
+    result = pdm(["run", "parent"], strict=True, obj=project)
+
+    assert "task parent" in result.stderr
+    assert f"test {termui.Emoji.ARROW_SEPARATOR} test" in result.stderr
+    assert "['test', 'test']" not in result.stderr
+    assert "task test" in result.stderr
+    assert "python -V" not in result.stderr
+    assert "['python', '-V']" not in result.stderr
+    assert "help" in result.stderr
+
+
+def test_run_composite_script_default_verbosity_with_show_header_and_help(project, pdm):
+    project.project_config.update({"scripts.show_header": True})
+    project.pyproject.settings["scripts"] = {
+        "test": {"cmd": "python -V", "help": "help"},
+        "parent": {"composite": ["test", "test"], "help": "composite"},
+    }
+    project.pyproject.write()
+
+    result = pdm(["run", "parent"], strict=True, obj=project)
+
+    assert "task parent" in result.stderr
+    assert "composite" in result.stderr
+    assert f"test {termui.Emoji.ARROW_SEPARATOR} test" not in result.stderr
+    assert "['test', 'test']" not in result.stderr
+    assert "task test" in result.stderr
+    assert "['python', '-V']" not in result.stderr
+    assert "python -V" not in result.stderr
+    assert "help" in result.stderr
+
+
+def test_run_composite_script_verbose(project, pdm):
+    project.pyproject.settings["scripts"] = {
+        "test": {"cmd": "python -V", "help": "help"},
+        "parent": {"composite": ["test", "test"], "help": "composite"},
+    }
+    project.pyproject.write()
+
+    result = pdm(["run", "-v", "parent"], strict=True, obj=project)
+
+    assert "task parent" in result.stderr
+    assert "composite" not in result.stderr
+    assert f"test {termui.Emoji.ARROW_SEPARATOR} test" not in result.stderr
+    assert "['test', 'test']" in result.stderr
+    assert "task test" in result.stderr
+    assert "['python', '-V']" in result.stderr
+    assert "python -V" not in result.stderr
+    assert "help" not in result.stderr

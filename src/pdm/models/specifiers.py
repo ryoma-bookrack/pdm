@@ -35,7 +35,7 @@ def _read_max_versions() -> dict[Version, int]:
 def get_specifier(version_str: str | None) -> SpecifierSet:
     if not version_str or version_str == "*":
         return SpecifierSet()
-    return SpecifierSet(fix_legacy_specifier(version_str))
+    return SpecifierSet(version_str)
 
 
 _legacy_specifier_re = re.compile(r"(==|!=|<=|>=|<|>)(\s*)([^,;\s)]*)")
@@ -74,7 +74,7 @@ class PySpecSet(SpecifierSet):
     PY_MAX_MINOR_VERSION = _read_max_versions()
     MAX_MAJOR_VERSION = max(PY_MAX_MINOR_VERSION)[:1].bump()
 
-    __slots__ = ("_specs", "_logic", "_prereleases")
+    __slots__ = ("_logic", "_prereleases", "_specs")
 
     def __init__(self, spec: str | VersionSpecifier = "") -> None:
         if spec == "<empty>":

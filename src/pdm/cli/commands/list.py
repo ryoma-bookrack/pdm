@@ -13,7 +13,7 @@ from pdm.cli.commands.base import BaseCommand
 from pdm.cli.options import venv_option
 from pdm.cli.utils import (
     DirectedGraph,
-    Package,
+    PackageNode,
     build_dependency_graph,
     check_project_file,
     get_dist_location,
@@ -122,13 +122,14 @@ class Command(BaseCommand):
 
         # Freeze.
         if options.freeze:
-            self.hande_freeze(project, options)
+            self.handle_freeze(project, options)
             return
 
         # Map dependency groups to requirements.
         name_to_groups: Mapping[str, set[str]] = defaultdict(set)
+        all_deps = project._resolve_dependencies()
         for g in project.iter_groups():
-            for r in project.get_dependencies(g):
+            for r in project.get_dependencies(g, all_deps):
                 k = r.key or "unknown"
                 name_to_groups[k].add(g)
 
@@ -182,7 +183,7 @@ class Command(BaseCommand):
             )
             self.handle_list(packages, name_to_groups, project, options)
 
-    def hande_freeze(self, project: Project, options: argparse.Namespace) -> None:
+    def handle_freeze(self, project: Project, options: argparse.Namespace) -> None:
         if options.tree:
             raise PdmUsageError("--tree cannot be used with --freeze")
         if options.reverse:
@@ -211,7 +212,7 @@ class Command(BaseCommand):
 
     def handle_graph(
         self,
-        dep_graph: DirectedGraph[Package | None],
+        dep_graph: DirectedGraph[PackageNode | None],
         project: Project,
         options: argparse.Namespace,
     ) -> None:
@@ -338,7 +339,7 @@ class Listable:
         # e.g. license = { file="LICENSE" } in pyproject.toml
         # To identify this, check for newlines or very long strings.
         # 50 chars is picked because the longest OSI license (WTFPL) full name is 43 characters.
-        is_full_text = self.licenses and "\n" in self.licenses or len(self.licenses or "") > 50
+        is_full_text = (self.licenses and "\n" in self.licenses) or len(self.licenses or "") > 50
 
         # If that is the case, look at the classifiers instead.
         if not self.licenses or is_full_text:

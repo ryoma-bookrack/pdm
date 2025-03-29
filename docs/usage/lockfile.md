@@ -24,7 +24,8 @@ There are a few similar commands to do this job with slight differences:
 `pdm sync` also has a few options to manage installed packages:
 
 - `--clean`: will remove packages no longer in the lockfile
-- `--only-keep`: only selected packages (using options like `-G` or `--prod`) will be kept.
+- `--clean-unselected` (or `--only-keep`): more thorough version of `--clean` that will also remove packages not in the groups specified by the `-G`, `-d`, and `--prod` options.
+  Note: by default, `pdm sync` selects all groups from the lockfile, so `--clean-unselected` is identical to `--clean` unless `-G`, `-d`, and `--prod` are used.
 
 ## Hashes in the lock file
 
@@ -42,7 +43,7 @@ If you want to refresh the lock file without changing the dependencies, you can 
 pdm lock --refresh
 ```
 
-This command also refreshes *all* file hashes recorded in the lock file.
+This command also refreshes _all_ file hashes recorded in the lock file.
 
 ## Specify another lock file to use
 
@@ -63,7 +64,7 @@ For a realistic example, your project depends on a release version of `werkzeug`
 requires-python = ">=3.7"
 dependencies = ["werkzeug"]
 
-[tool.pdm.dev-dependencies]
+[dependency-groups]
 dev = ["werkzeug @ file:///${PROJECT_ROOT}/dev/werkzeug"]
 ```
 

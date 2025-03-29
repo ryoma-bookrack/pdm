@@ -5,6 +5,7 @@ from functools import cached_property
 from typing import TYPE_CHECKING
 
 from pdm.exceptions import PdmUsageError
+from pdm.utils import normalize_name
 
 if TYPE_CHECKING:
     from typing import Iterator, Sequence
@@ -22,6 +23,7 @@ class GroupSelection:
         groups: Sequence[str] = (),
         group: str | None = None,
         excluded_groups: Sequence[str] = (),
+        exclude_non_existing: bool = False,
     ):
         self.project = project
         self.groups = groups
@@ -29,6 +31,7 @@ class GroupSelection:
         self.default = default
         self.dev = dev
         self.excluded_groups = excluded_groups
+        self.exclude_non_existing = exclude_non_existing
 
     @classmethod
     def from_options(cls, project: Project, options: argparse.Namespace) -> GroupSelection:
@@ -68,9 +71,9 @@ class GroupSelection:
     @cached_property
     def _translated_groups(self) -> list[str]:
         """Translate default, dev and groups containing ":all" into a list of groups"""
+        locked_groups = self.project.lockfile.groups
         if self.is_unset:
             # Default case, return what is in the lock file
-            locked_groups = self.project.lockfile.groups
             project_groups = list(self.project.iter_groups())
             if locked_groups:
                 return [g for g in locked_groups if g in project_groups]
@@ -78,31 +81,33 @@ class GroupSelection:
         if dev is None:  # --prod is not set, include dev-dependencies
             dev = True
         project = self.project
-        optional_groups = set(project.pyproject.metadata.get("optional-dependencies", {}))
-        dev_groups = set(project.pyproject.settings.get("dev-dependencies", {}))
-        groups_set = set(groups)
+        optional_groups = {normalize_name(g) for g in project.pyproject.metadata.get("optional-dependencies", {})}
+        dev_groups = set(project.pyproject.dev_dependencies)
+        groups_set = {normalize_name(g) if g != ":all" else g for g in groups}
         if groups_set & dev_groups:
             if not dev:
                 raise PdmUsageError("--prod is not allowed with dev groups and should be left")
         elif dev:
             groups_set.update(dev_groups)
+            if self.exclude_non_existing and locked_groups:
+                groups_set.intersection_update(locked_groups)
         if ":all" in groups:
             groups_set.discard(":all")
             groups_set.update(optional_groups)
-            groups_set -= set(self.excluded_groups)
+        if default:
+            groups_set.add("default")
+        groups_set -= {normalize_name(g) for g in self.excluded_groups}
 
-        invalid_groups = groups_set - set(project.iter_groups())
+        invalid_groups = groups_set - {normalize_name(g) for g in project.iter_groups()}
         if invalid_groups:
             project.core.ui.echo(
-                "[d]Ignoring non-existing groups: [success]" f"{', '.join(invalid_groups)}[/]",
+                f"[d]Ignoring non-existing groups: [success]{', '.join(invalid_groups)}[/]",
                 err=True,
             )
             groups_set -= invalid_groups
         # Sorts the result in ascending order instead of in random order
         # to make this function pure
-        result = sorted(groups_set)
-        if default:
-            result.insert(0, "default")
+        result = sorted(groups_set, key=lambda x: (x != "default", x))
         return result
 
     def validate(self) -> None:

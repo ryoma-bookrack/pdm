@@ -1,4 +1,3 @@
-import os
 import pathlib
 import sys
 import unittest.mock as mock
@@ -156,7 +155,7 @@ def test_add_ssh_scheme_to_git_uri(given, expected):
 
 class TestUrlToPath:
     def test_non_file_url(self):
-        with pytest.raises(AssertionError):
+        with pytest.raises(ValueError):
             utils.url_to_path("not_a_file_scheme://netloc/path")
 
     @pytest.mark.skipif(sys.platform.startswith("win"), reason="Non-Windows test")
@@ -171,27 +170,6 @@ class TestUrlToPath:
     @pytest.mark.skipif(not sys.platform.startswith("win"), reason="Windows test")
     def test_windows_localhost_local_file_url(self):
         assert utils.url_to_path("file://localhost/local/file/path") == "\\local\\file\\path"
-
-
-# Only testing POSIX-style paths here
-@pytest.mark.skipif(sys.platform.startswith("win"), reason="Non-Windows tests")
-@pytest.mark.parametrize(
-    "given, expected",
-    [
-        ("/path/to/my/pdm", "file:///path/to/my/pdm"),
-        ("/abs/path/to/my/pdm", "file:///abs/path/to/my/pdm"),
-        ("/path/to/my/pdm/pyproject.toml", "file:///path/to/my/pdm/pyproject.toml"),
-        ("../path/to/my/pdm/pyproject.toml", "file:///abs/path/to/my/pdm/pyproject.toml"),
-    ],
-)
-def test_path_to_url(given, expected):
-    if os.path.isabs(given):
-        assert utils.path_to_url(given) == expected
-    else:
-        abs_given = "abs" + str(given).replace("..", "")
-
-        with mock.patch("pdm.utils.os.path.abspath", return_value=abs_given):
-            assert utils.path_to_url(given) == expected
 
 
 @pytest.mark.parametrize(
@@ -217,11 +195,11 @@ def test_expand_env_vars(given, expected, monkeypatch):
         ("https://example.org/path?arg=1", "https://example.org/path?arg=1"),
         (
             "https://${FOO}@example.org/path?arg=1",
-            "https://hello@example.org/path?arg=1",
+            "https://token%3Aoidc%2F1@example.org/path?arg=1",
         ),
         (
             "https://${FOO}:${BAR}@example.org/path?arg=1",
-            "https://hello:wo%3Arld@example.org/path?arg=1",
+            "https://token%3Aoidc%2F1:p%40ssword@example.org/path?arg=1",
         ),
         (
             "https://${FOOBAR}@example.org/path?arg=1",
@@ -230,8 +208,8 @@ def test_expand_env_vars(given, expected, monkeypatch):
     ],
 )
 def test_expand_env_vars_in_auth(given, expected, monkeypatch):
-    monkeypatch.setenv("FOO", "hello")
-    monkeypatch.setenv("BAR", "wo:rld")
+    monkeypatch.setenv("FOO", "token:oidc/1")
+    monkeypatch.setenv("BAR", "p@ssword")
     assert utils.expand_env_vars_in_auth(given) == expected
 
 
@@ -431,7 +409,7 @@ def setup_dependencies(project):
             "optional-dependencies": {"web": ["flask"], "auth": ["passlib"]},
         }
     )
-    project.pyproject.settings.update({"dev-dependencies": {"test": ["pytest"], "doc": ["mkdocs"]}})
+    project.pyproject.dependency_groups.update({"test": ["pytest"], "doc": ["mkdocs"]})
     project.pyproject.write()
 
 
@@ -469,15 +447,15 @@ def test_dependency_group_selection(project, args, golden):
 @pytest.mark.parametrize(
     "args,golden",
     [
-        ({"groups": [":all"], "excluded_groups": ["web"]}, ["default", "auth", "test", "doc"]),
-        ({"groups": [":all"], "excluded_groups": ["web", "auth"]}, ["default", "test", "doc"]),
-        ({"groups": [":all"], "excluded_groups": ["default", "test"]}, ["default", "web", "auth", "doc"]),
+        ({"groups": [":all"], "excluded_groups": ["web"]}, ["default", "auth", "doc", "test"]),
+        ({"groups": [":all"], "excluded_groups": ["web", "auth"]}, ["default", "doc", "test"]),
+        ({"groups": [":all"], "excluded_groups": ["default", "test"]}, ["auth", "doc", "web"]),
     ],
 )
 def test_exclude_optional_groups_from_all(project, args, golden):
     setup_dependencies(project)
     selection = GroupSelection(project, **args)
-    assert sorted(golden) == sorted(selection)
+    assert golden == list(selection)
 
 
 def test_prod_should_not_be_with_dev(project):

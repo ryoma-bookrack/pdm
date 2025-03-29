@@ -61,9 +61,7 @@ If you’re a library developer, you need `setuptools` anyway.
 
 Poetry manages environments and dependencies in a similar way to Pipenv,
 but it can also build .whl files with your code, and it can upload wheels and source distributions to PyPI.
-It has a pretty user interface and users can customize it via a plugin. Poetry uses the `pyproject.toml` standard,
-but it does not follow the standard specifying how metadata should be represented in a pyproject.toml file ([PEP 621]),
-instead using a custom `[tool.poetry]` table. This is partly because Poetry came out before PEP 621.
+It has a pretty user interface and users can customize it via a plugin. Poetry uses the `pyproject.toml` standard.
 
 ### [Hatch](https://hatch.pypa.io)
 
@@ -77,7 +75,11 @@ Unlike Poetry and Hatch, PDM is not limited to a specific build backend; users h
 
 ## Installation
 
-PDM requires python version 3.8 or higher.
+<a href="https://repology.org/project/pdm/versions">
+    <img src="https://repology.org/badge/vertical-allrepos/pdm.svg" alt="Packaging status" align="right">
+</a>
+
+PDM requires python version 3.9 or higher.
 
 ### Via Install Script
 
@@ -92,7 +94,7 @@ curl -sSL https://pdm-project.org/install-pdm.py | python3 -
 **For Windows**
 
 ```powershell
-(Invoke-WebRequest -Uri https://pdm-project.org/install-pdm.py -UseBasicParsing).Content | py -
+powershell -ExecutionPolicy ByPass -c "irm https://pdm-project.org/install-pdm.py | py -"
 ```
 
 For security reasons, you should verify the checksum of `install-pdm.py`.
@@ -182,11 +184,6 @@ Tell people you are using PDM in your project by including the markdown code in 
 ```
 
 [![pdm-managed](https://img.shields.io/endpoint?url=https%3A%2F%2Fcdn.jsdelivr.net%2Fgh%2Fpdm-project%2F.github%2Fbadge.json)](https://pdm-project.org)
-
-
-## Packaging Status
-
-[![Packaging status](https://repology.org/badge/vertical-allrepos/pdm.svg)](https://repology.org/project/pdm/versions)
 
 ## PDM Eco-system
 

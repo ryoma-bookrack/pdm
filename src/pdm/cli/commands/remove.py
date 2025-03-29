@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import argparse
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING
 
 from pdm.cli.commands.base import BaseCommand
 from pdm.cli.filters import GroupSelection
@@ -82,7 +82,6 @@ class Command(BaseCommand):
         hooks: HookManager | None = None,
     ) -> None:
         """Remove packages from working set and pyproject.toml"""
-        from tomlkit.items import Array
 
         from pdm.cli.actions import do_lock, do_sync
         from pdm.cli.utils import check_project_file
@@ -111,18 +110,22 @@ class Command(BaseCommand):
                 for i in matched_indexes:
                     del deps[i]
                 tracked_names.add(normalize_name(name))
-        setter(cast(Array, deps).multiline(True))
+        setter(deps)
 
         if not dry_run:
             project.pyproject.write()
         if lock_groups and group not in lock_groups:
             project.core.ui.warn(f"Group [success]{group}[/] isn't in lockfile, skipping lock.")
             return
+        # It may remove the whole group, exclude it from lock groups first
+        project_groups = project.iter_groups()
+        if lock_groups is not None:
+            lock_groups = [g for g in lock_groups if g in project_groups]
         do_lock(project, "reuse", dry_run=dry_run, tracked_names=tracked_names, hooks=hooks, groups=lock_groups)
         if sync:
             do_sync(
                 project,
-                selection=GroupSelection(project, default=False, groups=[group]),
+                selection=GroupSelection(project, default=False, groups=[group], exclude_non_existing=True),
                 clean=True,
                 no_editable=no_editable,
                 no_self=no_self,

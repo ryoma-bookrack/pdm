@@ -48,7 +48,7 @@ class ActivateCommand(BaseCommand):
             shell = ""
         if shell == "fish":
             command, filename = "source", "activate.fish"
-        elif shell == "csh":
+        elif shell in ["csh", "tcsh"]:
             command, filename = "source", "activate.csh"
         elif shell in ["powershell", "pwsh"]:
             command, filename = ".", "Activate.ps1"
@@ -64,6 +64,6 @@ class ActivateCommand(BaseCommand):
 
     @staticmethod
     def quote(command: str, shell: str) -> str:
-        if shell in ["powershell", "pwsh"]:
-            return "'{}'".format(command.replace("'", "''"))
+        if shell in ["powershell", "pwsh"] or platform.system() == "Windows":
+            return "{}".format(command.replace("'", "''"))
         return shlex.quote(command)

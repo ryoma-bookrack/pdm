@@ -23,6 +23,7 @@ from os import name as os_name
 from pathlib import Path
 from typing import TYPE_CHECKING, Mapping
 
+from packaging.specifiers import InvalidSpecifier, SpecifierSet
 from packaging.version import Version, _cmpkey
 from pbs_installer import PythonVersion
 
@@ -35,8 +36,6 @@ if TYPE_CHECKING:
 
     from pdm._types import FileHash, RepositoryConfig
     from pdm.compat import Distribution
-
-_egg_fragment_re = re.compile(r"(.*)[#&]egg=[^&]*")
 
 try:
     _packaging_version = importlib_metadata.version("packaging")
@@ -188,7 +187,8 @@ def url_to_path(url: str) -> str:
 
     WINDOWS = sys.platform == "win32"
 
-    assert url.startswith("file:"), f"You can only turn file: urls into filenames (not {url!r})"
+    if not url.startswith("file:"):
+        raise ValueError(f"You can only turn file: urls into filenames (not {url!r})")
 
     _, netloc, path, _, _ = parse.urlsplit(url)
 
@@ -219,16 +219,10 @@ def url_to_path(url: str) -> str:
     return path
 
 
-def path_to_url(path: str) -> str:
-    """
-    Convert a path to a file: URL.  The path will be made absolute and have
-    quoted path parts.
-    """
-    from urllib.request import pathname2url
-
-    path = os.path.normpath(os.path.abspath(path))
-    url = parse.urljoin("file:", pathname2url(path))
-    return url
+def split_path_fragments(path: Path) -> tuple[Path, str]:
+    """Split a path into fragments"""
+    left, sep, right = path.as_posix().partition("#egg=")
+    return Path(left), sep + right
 
 
 def expand_env_vars(credential: str, quote: bool = False, env: Mapping[str, str] | None = None) -> str:
@@ -244,7 +238,7 @@ def expand_env_vars(credential: str, quote: bool = False, env: Mapping[str, str]
 
     def replace_func(match: Match) -> str:
         rv = env.get(match.group(1), match.group(0))
-        return parse.quote(rv) if quote else rv
+        return parse.quote(rv, "") if quote else rv
 
     return re.sub(r"\$\{(.+?)\}", replace_func, credential)
 
@@ -350,7 +344,7 @@ def normalize_name(name: str, lowercase: bool = True) -> str:
 
 def comparable_version(version: str) -> Version:
     """Normalize a version to make it valid in a specifier."""
-    parsed = parse_version(version)
+    parsed = parse_version(version or "0.0.0")
     if parsed.local is not None:
         # strip the local part
         parsed._version = parsed._version._replace(local=None)
@@ -394,7 +388,7 @@ def pdm_scheme(base: str) -> dict[str, str]:
             "purelib": "{pep582_base}/lib",
             "platlib": "{pep582_base}/lib",
             "include": "{pep582_base}/include",
-            "scripts": "{pep582_base}/%s" % bin_prefix,
+            "scripts": f"{{pep582_base}}/{bin_prefix}",
             "data": "{pep582_base}",
             "prefix": "{pep582_base}",
             "headers": "{pep582_base}/include",
@@ -445,14 +439,6 @@ def is_pip_compatible_with_python(python_version: Version | str) -> bool:
     pip = importlib_metadata.distribution("pip")
     requires_python = get_specifier(pip.metadata.get("Requires-Python"))
     return requires_python.contains(python_version, True)
-
-
-def path_without_fragments(path: str) -> Path:
-    """Remove egg fragment from path"""
-    match = _egg_fragment_re.search(path)
-    if not match:
-        return Path(path)
-    return Path(match.group(1))
 
 
 def is_in_zipapp() -> bool:
@@ -554,7 +540,7 @@ def get_all_installable_python_versions(build_dir: bool = False) -> list[PythonV
     from pbs_installer._versions import PYTHON_VERSIONS
 
     arch = "x86" if THIS_ARCH == "32" else THIS_ARCH
-    matches = [v for v, u in PYTHON_VERSIONS.items() if u.get((THIS_PLATFORM, arch, not build_dir))]
+    matches = [v for v, u in PYTHON_VERSIONS.items() if any(k[:2] == (THIS_PLATFORM, arch) for k in u)]
     return matches
 
 
@@ -568,3 +554,16 @@ def get_class_init_params(klass: type) -> set[str]:
         if not any(p.kind in (p.VAR_POSITIONAL, p.VAR_KEYWORD) for p in params.values()):
             break
     return arguments
+
+
+def get_requirement_from_override(name: str, value: str) -> str:
+    if is_url(value):
+        req = f"{name} @ {value}"
+    else:
+        try:
+            SpecifierSet(value)
+        except InvalidSpecifier:
+            req = f"{name}=={value}"
+        else:
+            req = f"{name}{value}"
+    return req

@@ -14,7 +14,7 @@ from typing import TYPE_CHECKING, Any, Sequence, TypeVar, cast
 
 from packaging.requirements import InvalidRequirement
 from packaging.requirements import Requirement as PackageRequirement
-from packaging.specifiers import SpecifierSet
+from packaging.specifiers import InvalidSpecifier, SpecifierSet
 from packaging.utils import parse_sdist_filename, parse_wheel_filename
 
 from pdm.compat import Distribution
@@ -28,8 +28,7 @@ from pdm.utils import (
     add_ssh_scheme_to_git_uri,
     comparable_version,
     normalize_name,
-    path_to_url,
-    path_without_fragments,
+    split_path_fragments,
     url_to_path,
     url_without_fragments,
 )
@@ -102,7 +101,7 @@ class Requirement:
             return False
 
         sp = next(iter(self.specifier))
-        return sp.operator == "===" or sp.operator == "==" and "*" not in sp.version
+        return sp.operator == "===" or (sp.operator == "==" and "*" not in sp.version)
 
     def as_pinned_version(self: T, other_version: str | None) -> T:
         """Return a new requirement with the given pinned version."""
@@ -143,7 +142,10 @@ class Requirement:
         if "extras" in kwargs and isinstance(kwargs["extras"], str):
             kwargs["extras"] = tuple(e.strip() for e in kwargs["extras"][1:-1].split(","))
         version = kwargs.pop("version", "")
-        kwargs["specifier"] = get_specifier(version)
+        try:
+            kwargs["specifier"] = get_specifier(version)
+        except InvalidSpecifier as e:
+            raise RequirementError(f"Invalid specifier for {kwargs.get('name')}: {version}: {e}") from None
         return cls(**{k: v for k, v in kwargs.items() if k in inspect.signature(cls).parameters})
 
     @classmethod
@@ -169,16 +171,16 @@ class Requirement:
         return NamedRequirement.create(name=dist.metadata["Name"], version=f"=={dist.version}")
 
     @classmethod
-    def from_req_dict(cls, name: str, req_dict: RequirementDict, check_installable: bool = True) -> Requirement:
+    def from_req_dict(cls, name: str, req_dict: RequirementDict) -> Requirement:
         if isinstance(req_dict, str):  # Version specifier only.
-            return NamedRequirement(name=name, specifier=get_specifier(req_dict))
+            return NamedRequirement.create(name=name, version=req_dict)
         for vcs in VCS_SCHEMA:
             if vcs in req_dict:
                 repo = cast(str, req_dict.pop(vcs, None))
                 url = f"{vcs}+{repo}"
                 return VcsRequirement.create(name=name, vcs=vcs, url=url, **req_dict)
         if "path" in req_dict or "url" in req_dict:
-            return FileRequirement.create(name=name, **req_dict, check_installable=check_installable)
+            return FileRequirement.create(name=name, **req_dict)
         return NamedRequirement.create(name=name, **req_dict)
 
     @property
@@ -201,11 +203,8 @@ class Requirement:
         is the same requirement as this one.
         """
         req = parse_line(line)
-        return (
-            self.key == req.key
-            or isinstance(self, FileRequirement)
-            and isinstance(req, FileRequirement)
-            and self.url == req.url
+        return self.key == req.key or (
+            isinstance(self, FileRequirement) and isinstance(req, FileRequirement) and self.url == req.url
         )
 
     @classmethod
@@ -221,7 +220,7 @@ class Requirement:
         if getattr(req, "url", None):
             link = Link(cast(str, req.url))
             klass = VcsRequirement if link.is_vcs else FileRequirement
-            return klass(url=cast(str, req.url), **kwargs)
+            return klass(url=cast(str, req.url), **kwargs)  # type: ignore[arg-type]
         else:
             return NamedRequirement(**kwargs)  # type: ignore[arg-type]
 
@@ -243,14 +242,11 @@ class FileRequirement(Requirement):
     url: str = ""
     path: Path | None = None
     subdirectory: str | None = None
-    check_installable: bool = True
     _root: Path = dataclasses.field(default_factory=Path.cwd, repr=False)
 
     def __post_init__(self) -> None:
         super().__post_init__()
         self._parse_url()
-        if self.is_local_dir and self.check_installable:
-            self._check_installable()
 
     def _hash_key(self) -> tuple:
         return (*super()._hash_key(), self.get_full_url(), self.editable)
@@ -309,17 +305,27 @@ class FileRequirement(Requirement):
         return result
 
     def _parse_url(self) -> None:
-        if not self.url and self.path and self.path.is_absolute():
-            self.url = path_to_url(self.path.as_posix())
-        if not self.path:
-            path = get_relative_path(self.url)
-            if path is None:
+        if self.path:
+            path, fragments = split_path_fragments(self.path)
+            if not self.url and path.is_absolute():
+                self.url = path.as_uri() + fragments
+                self.path = path
+            # For relative path, we don't resolve URL now, so the path may still contain fragments,
+            # it will be handled in `relocate()` method.
+            result = Setup.from_directory(self.absolute_path)  # type: ignore[arg-type]
+            if result.name:
+                self.name = result.name
+        else:
+            url = url_without_fragments(self.url)
+            relpath = get_relative_path(url)
+            if relpath is None:
                 try:
-                    self.path = path_without_fragments(url_to_path(self.url))
-                except AssertionError:
+                    self.path = Path(url_to_path(url))
+                except ValueError:
                     pass
             else:
-                self.path = path_without_fragments(path)
+                self.path = Path(relpath)
+
         if self.url:
             self._parse_name_from_url()
 
@@ -328,11 +334,12 @@ class FileRequirement(Requirement):
         if self.path is None or self.path.is_absolute():
             return
         # self.path is relative
-        self.path = path_without_fragments(os.path.relpath(self.path, backend.root))
-        path = self.path.as_posix()
-        if path == ".":
-            path = ""
-        self.url = backend.relative_path_to_url(path)
+        path, fragments = split_path_fragments(self.path)
+        self.path = Path(os.path.relpath(path, backend.root))
+        relpath = self.path.as_posix()
+        if relpath == ".":
+            relpath = ""
+        self.url = backend.relative_path_to_url(relpath) + fragments
         self._root = backend.root
 
     @property
@@ -390,15 +397,15 @@ class FileRequirement(Requirement):
         if not self.name and not self.is_vcs:
             self.name = self.guess_name()
 
-    def _check_installable(self) -> None:
-        assert self.path
-        if not self.path.exists():
-            return
-        if not (self.path.joinpath("setup.py").exists() or self.path.joinpath("pyproject.toml").exists()):
-            raise RequirementError(f"The local path '{self.path}' is not installable.")
-        result = Setup.from_directory(self.path.absolute())
-        if result.name:
-            self.name = result.name
+    def check_installable(self) -> None:
+        if path := self.absolute_path:
+            if not path.exists():
+                raise RequirementError(f"The local path '{self.path}' does not exist.")
+            if path.is_dir():
+                if not path.joinpath("setup.py").exists() and not path.joinpath("pyproject.toml").exists():
+                    raise RequirementError(f"The local path '{self.path}' is not installable.")
+            elif self.editable:
+                raise RequirementError("Local file requirement must not be editable.")
 
 
 @dataclasses.dataclass(eq=False)
@@ -492,7 +499,7 @@ def parse_requirement(line: str, editable: bool = False) -> Requirement:
         # We replace the {root.uri} temporarily with a dummy URL header
         # to make it pass through the packaging.requirement parser
         # and then revert it.
-        root_url = path_to_url(Path().as_posix())
+        root_url = Path().absolute().as_uri()
         replaced = "{root:uri}" in line
         if replaced:
             line = line.replace("{root:uri}", root_url)
@@ -514,8 +521,7 @@ def parse_requirement(line: str, editable: bool = False) -> Requirement:
             r.path = Path(get_relative_path(r.url) or "")
 
     if editable:
-        if r.is_vcs or r.is_file_or_url and r.is_local_dir:  # type: ignore[attr-defined]
-            assert isinstance(r, FileRequirement)
+        if isinstance(r, FileRequirement) and (r.is_vcs or not r.url or r.url.startswith("file://")):
             r.editable = True
         else:
             raise RequirementError(f"{line}: Editable requirement is only supported for VCS link or local directory.")
